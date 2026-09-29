@@ -5,3 +5,6 @@ server/tts_server.log
 server/*.pyc
 server/__pycache__/
 .git/
+server/preset.conf
+server/st_cache/
+server/.tts_server.pid
