@@ -71,7 +71,10 @@ _default_audio_temperature = float(os.environ.get("MOSS_AUDIO_TEMPERATURE", "0.8
 # Preset hot-swap state (the web-page dropdown reloads the model in the background).
 _reload_lock = threading.Lock()
 _reload_state = {"busy": False, "target": None, "error": None}
-PRESET_FILE = Path(__file__).resolve().parent / "preset.conf"
+# Where the dropdown's choice is saved. Docker points this into the model volume
+# (entrypoint.sh) so it survives the container being recreated.
+PRESET_FILE = Path(os.environ.get("MOSS_PRESET_FILE")
+                   or Path(__file__).resolve().parent / "preset.conf")
 
 
 def load_speakers() -> list[dict]:
@@ -860,9 +863,18 @@ class TTSRequest(BaseModel):
 
 
 app = FastAPI(title="MOSS-TTS-PNY LAN server")
+# Browser origins allowed to call this server. Default: pages served from this
+# machine (localhost, any port) plus the server's own test page. Set
+# MOSS_CORS_ORIGINS to a comma-separated list (e.g. "http://192.168.1.20:8000")
+# to add a SillyTavern on another device, or "*" to allow any site.
+_CORS_ENV = [o.strip().rstrip("/") for o in os.environ.get("MOSS_CORS_ORIGINS", "").split(",") if o.strip()]
+_CORS_ANY = "*" in _CORS_ENV
+_LOCAL_ORIGIN_RE = r"https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?"
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"] if _CORS_ANY else _CORS_ENV,
+    allow_origin_regex=None if _CORS_ANY else _LOCAL_ORIGIN_RE,
     allow_methods=["*"],
     allow_headers=["*"],
     # Custom response headers are invisible to browser fetch() by default
@@ -897,6 +909,29 @@ def _client_app(request: Request) -> str:
     if request.url.path in _ST_COMPAT_PATHS:
         return "sillytavern"
     return "unspecified"
+
+
+def _origin_allowed(request: Request) -> bool:
+    """CORS only hides responses; it doesn't stop a random website from firing a
+    "simple" POST (e.g. POST /preset?name=potato) at this server. So state-changing
+    requests carrying a foreign Origin header are refused outright. Non-browser
+    clients (the game, curl, SillyTavern's backend) send no Origin and pass."""
+    origin = request.headers.get("origin")
+    if not origin or _CORS_ANY:
+        return True
+    origin = origin.rstrip("/")
+    if origin in _CORS_ENV or re.fullmatch(_LOCAL_ORIGIN_RE, origin):
+        return True
+    host = request.headers.get("host", "")
+    return origin in (f"http://{host}", f"https://{host}")  # the server's own page
+
+
+@app.middleware("http")
+async def _origin_guard_middleware(request: Request, call_next):
+    if request.method not in ("GET", "HEAD", "OPTIONS") and not _origin_allowed(request):
+        return JSONResponse(status_code=403, content={
+            "detail": "cross-origin request refused; add this origin to MOSS_CORS_ORIGINS"})
+    return await call_next(request)
 
 
 @app.middleware("http")
@@ -1663,10 +1698,9 @@ def sfx(query: str = Query(..., min_length=2, max_length=120)):
     is fetched exactly once, so gameplay replays are instant and offline.
     Fetch order (skipped entirely if MOSS_SFX_ALLOW_NETWORK=0): Freesound API
     (if a key is configured) -> Freesound public search page (no key) -> BBC
-    archive (no key) -> fuzzy match against whatever has already been cached
-    from a previous successful fetch (there's no bundled sound library —
-    with network calls disabled from a fresh install, nothing has ever been
-    cached yet, so this returns 404 until/unless network access is enabled)."""
+    archive (no key) -> fuzzy match against the cache (sfx_cache/manifest.json,
+    which includes any sounds shipped in sfx_cache/). With network calls
+    disabled, only cached sounds can be served."""
     cache = _sfx_cache_path(query)
     if cache.exists():
         return Response(cache.read_bytes(), media_type="audio/mpeg")
@@ -1920,7 +1954,6 @@ def openai_compat_generate(req: OpenAISpeechRequest):
 # plain clickable link rather than needing blob/IndexedDB machinery.
 ST_CACHE_DIR = Path(__file__).resolve().parent / "st_cache"
 ST_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-app.mount("/st_cache", StaticFiles(directory=str(ST_CACHE_DIR)), name="st_cache")
 
 
 def _safe_path_component(s: str, fallback: str = "untitled", max_len: int = 80) -> str:
@@ -1984,6 +2017,11 @@ def st_cache_generate(req: STCacheGenerateRequest):
         media_type="audio/wav",
         headers={"X-Cache-Path": cache_path},
     )
+
+
+# Mounted AFTER the POST route above: a Mount matches every method under its
+# prefix, so registered first it would swallow POST /st_cache/generate (405).
+app.mount("/st_cache", StaticFiles(directory=str(ST_CACHE_DIR)), name="st_cache")
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -2445,7 +2483,8 @@ def _reload_worker(preset: str) -> None:
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--host", default="0.0.0.0")
+    p.add_argument("--host", default="127.0.0.1",
+                   help="bind address (0.0.0.0 = reachable from other devices)")
     p.add_argument("--port", type=int, default=8000)
     p.add_argument("--max-new-tokens", type=int, default=None,
                    help="override the preset's token ceiling")
@@ -2453,13 +2492,18 @@ def main() -> None:
                    help="default audio sampling temperature for requests that don't set one "
                         "(default: env MOSS_AUDIO_TEMPERATURE, then 0.85)")
     p.add_argument("--preset", default=None, choices=list(PRESETS),
-                   help="performance/VRAM preset (default: env MOSS_PERF_PRESET, "
-                        "then preset.conf, then 'quality')")
+                   help="performance/VRAM preset (default: preset.conf, "
+                        "then env MOSS_PERF_PRESET, then 'balanced')")
     args = p.parse_args()
 
-    # Resolve preset: CLI flag > env > persisted preset.conf (set by the dropdown) > default
+    # Resolve preset: CLI flag > persisted preset.conf (set by the dropdown) > env > default.
+    # The saved choice beats MOSS_PERF_PRESET so the dropdown sticks across restarts even
+    # though compose files always set the env var; the env var is the first-run default.
     if args.preset is None:
-        args.preset = os.environ.get("MOSS_PERF_PRESET") or _persisted_preset() or DEFAULT_PRESET
+        env_preset = os.environ.get("MOSS_PERF_PRESET", "").strip()
+        args.preset = (_persisted_preset()
+                       or (env_preset if env_preset in PRESETS else None)
+                       or DEFAULT_PRESET)
 
     # CLI --temperature overrides the env/hardcoded default
     if args.temperature is not None:

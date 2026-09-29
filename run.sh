@@ -5,9 +5,10 @@
 # tailored to your hardware (right build target, right device-passthrough
 # flags, right performance preset), and optionally builds + starts it.
 #
-# Does NOT install Docker, the NVIDIA Container Toolkit, or ROCm itself —
-# those are prerequisites. See DISTRIBUTING.md: confirm your GPU driver works
-# OUTSIDE Docker first (nvidia-smi / rocm-smi), or nothing here will help.
+# Offers to install missing Docker pieces and the NVIDIA Container Toolkit
+# (always asks first). It does NOT install GPU drivers or ROCm: confirm your
+# GPU driver works OUTSIDE Docker first (nvidia-smi / rocm-smi). See
+# DISTRIBUTING.md.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -456,6 +457,18 @@ fi
 
 echo "  Using port: ${BOLD}${HOST_PORT}${RESET}"
 
+# The server has no login. By default only this machine can reach it; other
+# containers on the same Docker network (e.g. SillyTavern) still can.
+echo
+read -rp "  Let other devices on your network reach the server (e.g. the game on another PC)? [y/N]: " allow_lan
+if [[ "$allow_lan" =~ ^[Yy] ]]; then
+    BIND_PREFIX=""
+    warn "Reachable from your whole network. Don't forward port $HOST_PORT on your router."
+else
+    BIND_PREFIX="127.0.0.1:"
+    echo "  Only this machine can reach it."
+fi
+
 # -----------------------------------------------------------------------------
 # 4c. Sound effects: outgoing internet access
 # -----------------------------------------------------------------------------
@@ -541,7 +554,7 @@ ${MEM_LIMIT_LINES}    deploy:
               count: all
               capabilities: [gpu]
     ports:
-      - "${HOST_PORT}:${HOST_PORT}"
+      - "${BIND_PREFIX}${HOST_PORT}:${HOST_PORT}"
     volumes:
       - pone-ttsmod_release:/app/release
 ${SFX_VOLUME_LINE}      - ./server/voice_patch:/app/voice_patch   # drop adapter_model.safetensors here if missing — no rebuild needed
@@ -591,7 +604,7 @@ ${MEM_LIMIT_LINES}    devices:
     ipc: host
     shm_size: "${SHM_SIZE}"
     ports:
-      - "${HOST_PORT}:${HOST_PORT}"
+      - "${BIND_PREFIX}${HOST_PORT}:${HOST_PORT}"
     volumes:
       - pone-ttsmod_release:/app/release
 ${SFX_VOLUME_LINE}      - ./server/voice_patch:/app/voice_patch   # drop adapter_model.safetensors here if missing — no rebuild needed
@@ -645,7 +658,11 @@ else
     echo "    - Reuse the existing ${IMAGE_TAG} image (no build)"
 fi
 echo "    - On first start on a fresh volume, download the ~12 GB model + apply the voice patch"
-echo "    - Expose the server on host port ${HOST_PORT}"
+if [[ -n "$BIND_PREFIX" ]]; then
+    echo "    - Serve on http://localhost:${HOST_PORT} (this machine only)"
+else
+    echo "    - Serve on port ${HOST_PORT} to your whole network"
+fi
 echo
 read -rp "Proceed now? [Y/n]: " proceed
 proceed="${proceed:-Y}"

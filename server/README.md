@@ -7,13 +7,13 @@ PonyPonyParadise TTS mod.
 
 - 43 speakers (ids 0–32 = MLP, 33–42 = TF2). See `GET /speakers`.
 - Output: 48 kHz mono WAV.
-- Default address: `http://127.0.0.1:8000` (bind `0.0.0.0` to reach it from other
-  devices on your network).
+- Default address: `http://127.0.0.1:8000`. `server.py` on its own binds `127.0.0.1`
+  (this machine only); `./tts.py start` and `run_server.bat` bind `0.0.0.0` so the game
+  can reach it from other devices on your network.
+- The Docker build (see `../README.md`) uses port `8800` instead.
 
 ## Setup (one time)
-Easiest is the launcher in the parent folder (`START-WINDOWS.bat`, or on Linux run
-`bash START-LINUX.sh` from a terminal) — it runs setup automatically the first time.
-To do it by hand:
+Run the setup script for your OS:
 ```bash
 ./setup.sh           # Linux/macOS
 ```
@@ -21,7 +21,8 @@ To do it by hand:
 setup.bat            REM Windows (native, no WSL needed)
 ```
 Creates a venv, installs PyTorch (CUDA 12.8) + deps, downloads the model (~12 GB) from
-HuggingFace, and applies the hybrid-vocoder patch.
+HuggingFace, fixes a bug in the downloaded runtime (`patch_torchopt_bundle.py`) and
+applies the voice patch if `voice_patch/adapter_model.safetensors` is present.
 
 **Requires an NVIDIA GPU** (AMD works only through the Docker build, and that is highly experimental; see `../DISTRIBUTING.md`). The model's codec runs CUDA-only (there is no CPU build),
 so a discrete NVIDIA card is mandatory. ~6 GB VRAM minimum on the `potato` preset,
@@ -103,11 +104,12 @@ curl "http://127.0.0.1:8000/normalize?text=I+beg+you"
 ```
 
 ## Speed vs reliability (vocoder mode)
-Set by `MOSS_DECODER_RUNTIME`:
+Each preset picks a vocoder (`quality` → `onnx_cuda`, the others → `onnx_cpu`).
+Override it with `MOSS_DECODER_RUNTIME`:
 
 | mode | notes |
 |------|-------|
-| `onnx_hybrid` **(default)** | short/normal lines decode on GPU (fast); very long lines fall back to CPU, and a GPU-OOM auto-retries on CPU — so it can't run out of VRAM. Best all-round. |
+| `onnx_hybrid` | short/normal lines decode on GPU (fast); very long lines fall back to CPU, and a GPU-OOM auto-retries on CPU — so it can't run out of VRAM. |
 | `onnx_cpu` | vocoder always on system RAM. Slower on long lines, never touches VRAM. |
 | `onnx_cuda` | everything on GPU; fastest, but can fail on very long lines on smaller cards. |
 
@@ -119,6 +121,8 @@ Tuning: `MOSS_VOCODER_GPU_MAX_FRAMES` (hybrid GPU/CPU split, default 600 ≈ ~12
 cap, default 5). Each `/tts` reply includes an `X-Timing` header (`gen=`/`dec=`/`audio=`).
 
 ## Troubleshooting
+- **A browser page on another device gets 403:** add its origin to `MOSS_CORS_ORIGINS`
+  (e.g. `MOSS_CORS_ORIGINS=http://192.168.1.20:8000`). The game and curl aren't affected.
 - **Game can't reach the server from another PC:** start with `--host 0.0.0.0` and open
   port 8000 in your firewall **to your LAN only** (e.g. `sudo ufw allow from
   192.168.0.0/16 to any port 8000`). Do not expose it to the internet.
@@ -132,7 +136,8 @@ cap, default 5). Each `/tts` reply includes an `X-Timing` header (`gen=`/`dec=`/
 - `tts.py` — start/stop/status helper
 - `run_server.sh` — launcher (sets up the bundled CUDA libs)
 - `download_model.py` — fetches the model from HuggingFace (run by setup.sh)
-- `portable_tts_runtime.patched.py` — the modded runtime, overlaid onto the bundle by setup
+- `patch_torchopt_bundle.py` — fixes a NameError in the downloaded runtime (run by setup)
+- `apply_voice_patch.py` — merges the optional voice patch into the model (run by setup)
 - `pronunciations.txt` — your pronunciation overrides
 - `release/`, `venv/` — created by setup (model weights + Python env; not shipped)
 

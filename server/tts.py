@@ -8,7 +8,7 @@ Usage:
     ./tts.py status     # is it running? health + GPU memory
     ./tts.py clear      # kill the server AND free the GPU (same as stop, explicit)
     ./tts.py logs       # tail the server log
-    ./tts.py preset X   # set performance preset: quality | balanced | low_vram
+    ./tts.py preset X   # set performance preset: quality | balanced | low_vram | potato
     ./tts.py blend            # show voice-patch blend (default + per-speaker)
     ./tts.py blend 0.6        # default strength 0..1 (0 = original voices, 1 = full patch)
     ./tts.py blend rainbow 0.5   # per-speaker override (name or id; -1 clears it)
@@ -41,11 +41,12 @@ SERVICE = "moss-tts.service"
 
 
 def _preset() -> str:
-    """Chosen performance/VRAM preset: env > preset.conf > 'quality'."""
-    val = os.environ.get("MOSS_PERF_PRESET", "").strip()
-    if not val and PRESET_FILE.exists():
-        val = PRESET_FILE.read_text(encoding="utf-8").strip()
-    return val if val in PRESETS else "quality"
+    """Chosen performance/VRAM preset: preset.conf > env > 'balanced'
+    (same order as server.py, so the web dropdown's choice sticks)."""
+    val = PRESET_FILE.read_text(encoding="utf-8").strip() if PRESET_FILE.exists() else ""
+    if val not in PRESETS:
+        val = os.environ.get("MOSS_PERF_PRESET", "").strip()
+    return val if val in PRESETS else "balanced"
 
 
 # --- helpers ---------------------------------------------------------------

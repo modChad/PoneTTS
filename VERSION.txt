@@ -107,7 +107,7 @@ KNOWN ISSUES
 ------------
   - AMD: the ROCm image sets HSA_OVERRIDE_GFX_VERSION=11.0.2 (RX 7700S,
     gfx1102) for every AMD card. Other cards may need a different value or
-    none at all. docker-compose.snippet.yml still shows 11.0.0.
+    none at all.
   - AMD confirmed on real hardware (RX 7700S): the image builds, the model
     downloads, and the server loads onto the GPU and reports ready. Still
     open on that machine: Docker networking (no DNS from the container, port
@@ -117,6 +117,17 @@ KNOWN ISSUES
 
 CHANGES IN THIS RELEASE
 -----------------------
+  - Fixed POST /st_cache/generate returning 405 (the static /st_cache mount
+    was registered first and swallowed it)
+  - The web dropdown's preset now persists in Docker: it's saved in the model
+    volume and wins over MOSS_PERF_PRESET (tts.py uses the same order)
+  - Bare-metal setup.sh / setup.bat now run patch_torchopt_bundle.py, fixing
+    a NameError on the first generation
+  - Security: run.sh binds the port to 127.0.0.1 unless you allow network
+    access; server.py defaults to --host 127.0.0.1; CORS limited to local
+    pages plus MOSS_CORS_ORIGINS; cross-origin POSTs from other sites refused
+  - Docs brought in line with the code (default preset, vocoder defaults,
+    missing launcher/file names, voice patch not included, HSA value)
   - Renamed TTSMODv4-BERK to PoneTTS; container, images and volumes renamed
     from ttsmod to pone-ttsmod
   - run.sh installs missing Docker CLI / Engine / Compose / buildx (pacman,
