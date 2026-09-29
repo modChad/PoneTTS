@@ -1,0 +1,160 @@
+PoneTTS
+=======
+
+Docker bundle for the MOSS-TTS-PNY voice server: 43 voices (0-32 My Little
+Pony, 33-42 Team Fortress 2), 48 kHz mono WAV. Voice backend for Pony Pony
+Paradise (PPP) and SillyTavern.
+
+Updated: 2026-09-28
+Previously: TTSMODv4-BERK (server v2.8, pass 1 of 2)
+
+AMD (ROCm) SUPPORT IS HIGHLY EXPERIMENTAL
+  NVIDIA is the supported path. The AMD image has run on exactly one
+  machine (an RX 7700S laptop) and needed manual workarounds to get there.
+  Expect problems on other AMD cards, and don't rely on it yet.
+
+
+QUICK START (Linux)
+-------------------
+  ./run.sh
+
+  Installs any missing Docker pieces (CLI, Engine, Compose, buildx) after
+  asking, detects your GPU and VRAM, picks a preset, writes
+  docker-compose.yml, then builds and starts the server. Not on Linux, or
+  want to do it by hand? See DISTRIBUTING.md.
+
+  Before running: your GPU driver must work outside Docker (nvidia-smi or
+  rocm-smi should list your card). On NVIDIA, run.sh also checks for the
+  NVIDIA Container Toolkit and offers to install it.
+
+  First start downloads the ~12 GB model; allow up to ~20 minutes.
+
+
+NAMES
+-----
+  Container / service   pone-ttsmod
+  Images                pone-ttsmod:cuda (NVIDIA), pone-ttsmod:rocm (AMD)
+  Volumes               pone-ttsmod_release (model), pone-ttsmod_sfx_cache
+  Default port          8800
+  SillyTavern URL       http://pone-ttsmod:8800/v1/audio/speech
+
+  Upgrading from TTSMODv4-BERK: the volumes were renamed, so the model
+  downloads again on first start. Afterwards you can remove the old ones:
+    docker volume rm ttsmod_release ttsmod_sfx_cache
+
+
+BUILD TARGETS
+-------------
+  runtime-cuda   NVIDIA   CUDA 12.8, torch 2.11.0
+  runtime-rocm   AMD      ROCm 6.4,  torch 2.9.1 (newest with a rocm6.4 wheel)
+                          (highly experimental, see above)
+
+  Both use Python 3.12 (required by numpy 2.5.0).
+
+
+PERFORMANCE PRESETS (MOSS_PERF_PRESET)
+--------------------------------------
+  quality    ~14-16 GB   vocoder on GPU (NVIDIA only; on AMD it falls back
+                         to the CPU, same as balanced)
+  balanced   ~9-12 GB    vocoder on CPU (server default)
+  low_vram   ~7-8 GB     no CUDA-graph capture, shorter line cap
+  potato     ~6 GB       as low_vram with the shortest line cap. Not
+                         quantized: the model bundle has no int8 support
+
+  run.sh suggests: under 7 GB potato, 7-9 GB low_vram, 9-12.5 GB balanced,
+  above that quality (balanced on AMD).
+
+  Switchable live from the web page at http://localhost:8800/
+
+
+FEATURES
+--------
+  Endpoints
+    /tts, /tts_stream/                     native synthesis
+    /v1/audio/speech                       OpenAI-compatible (SillyTavern)
+    /tts_to_audio/, /speakers,             XTTSv2-compatible (SillyTavern)
+      /set_tts_settings
+    /st_cache/generate, /st_cache/         server-side clip cache
+    /sfx                                   sound effects (Freesound / BBC)
+    /preset, /voice_blend, /normalize,     tuning and diagnostics
+      /gpu, /health, /speakers
+    /                                      browser test page
+
+  Speech quality
+    - Long text split into clauses at . ! ? : ; and em-dashes, with short
+      pauses, so long paragraphs and poems don't cut off (up to 200 clauses)
+    - Newlines in input handled correctly
+    - Stuck-word detection and retry (MOSS_FIX_STUCK_WORDS, on by default)
+    - Pronunciation fixes: pronunciations.txt, optional voice patch LoRA
+      (server/voice_patch/), per-speaker voice blend, and per-request
+      client_pronunciations overrides
+    - Optional Whisper-based pronunciation check (MOSS_FIX_PRON,
+      MOSS_AUTO_RESPELL; off by default)
+
+  Operations
+    - Request log shows which client called: webui, sillytavern,
+      ppp (via X-Client-App header) or unspecified
+    - /sfx validates downloads before caching; MOSS_SFX_ALLOW_NETWORK=0
+      makes it cache-only (no outgoing requests)
+    - Voice patch and st_cache/ are bind-mounted from server/, so adding the
+      patch or reading cached clips needs no rebuild
+    - Entrypoint re-applies the voice patch and the torchopt bundle fix on
+      every start, and fails fast with a clear message if the GPU isn't
+      visible
+
+
+KNOWN ISSUES
+------------
+  - AMD: the ROCm image sets HSA_OVERRIDE_GFX_VERSION=11.0.2 (RX 7700S,
+    gfx1102) for every AMD card. Other cards may need a different value or
+    none at all. docker-compose.snippet.yml still shows 11.0.0.
+  - AMD confirmed on real hardware (RX 7700S): the image builds, the model
+    downloads, and the server loads onto the GPU and reports ready. Still
+    open on that machine: Docker networking (no DNS from the container, port
+    8800 unreachable from the host) and a system out-of-memory crash while
+    running. The NVIDIA image hasn't been built on real hardware yet.
+
+
+CHANGES IN THIS RELEASE
+-----------------------
+  - Renamed TTSMODv4-BERK to PoneTTS; container, images and volumes renamed
+    from ttsmod to pone-ttsmod
+  - run.sh installs missing Docker CLI / Engine / Compose / buildx (pacman,
+    apt, dnf, zypper; uses Docker's official repo packages if configured),
+    starts the Docker service, falls back to standalone docker-compose,
+    and explains how to join the docker group
+  - Added .gitignore
+  - run.sh on Arch: if a CLI-only package (e.g. docker-cli-bin) is installed,
+    it explains that "docker" replaces it and lets pacman ask, instead of
+    failing on the conflict; Docker Desktop (engine in a VM, no local
+    dockerd) is no longer treated as a missing engine
+  - run.sh uses plain-text build progress when its output is piped or
+    logged (fixes "failed to get console: provided file is not a console"
+    with "./run.sh | tee build.log")
+  - entrypoint.sh explains a failed model download (exit code, likely cause,
+    free disk space) and waits 60s before exiting, instead of crash-looping
+    silently; the first-run marker now lives in the model volume as the
+    comments always said
+  - Model download uses the plain HuggingFace downloader by default
+    (HF_HUB_ENABLE_HF_TRANSFER=0, HF_HUB_DISABLE_XET=1). The fast downloaders
+    got the container killed mid-download on the AMD test machine; the
+    plain one finished the full download in 7m40s
+  - run.sh caps the container's system RAM (all but a quarter of RAM,
+    keeping at least 3 GB back, swap off for the container), so running out
+    of memory restarts the server instead of taking down the desktop. On
+    AMD, shm_size shrinks to fit inside the cap
+  - run.sh checks for the NVIDIA Container Toolkit and offers to install it
+    (pacman, or apt/dnf/zypper when NVIDIA's repo is set up), then restarts
+    Docker
+  - run.sh preset thresholds: 6 GB cards now get potato (was low_vram);
+    warns under ~5.5 GB; AMD is never auto-suggested quality
+  - potato relabelled everywhere: it was described as int8 (bitsandbytes),
+    but the model bundle only supports "none" or torchao fp8
+  - Docker images install exactly one onnxruntime package: onnxruntime-gpu
+    on NVIDIA (the build now fails if its CUDA provider is missing), CPU
+    onnxruntime on AMD. Previously faster-whisper's CPU package could
+    overwrite the GPU one
+  - Server logs a clear warning and uses the CPU vocoder when quality's GPU
+    vocoder can't run (AMD, or no CUDA provider), instead of falling back
+    silently
+  - server/README.md: default preset corrected to balanced

@@ -1,0 +1,113 @@
+# Merge ONE of the two service blocks below into your existing
+# docker-compose.yml — whichever matches this host's actual GPU. Both are
+# shown for reference/future use if you ever move this to a different
+# machine; don't enable both at once.
+#
+# Common to both:
+#   - Same `networks:` entry as your SillyTavern service, so ST can reach
+#     this container by name (http://pone-ttsmod:8800/v1/audio/speech) instead of
+#     the host IP that wasn't reachable from inside the ST container.
+#   - release/ (the ~12 GB model) lives in a named volume so it survives
+#     rebuilds and isn't baked into the image.
+#   - If pone-ttsmod shares a network namespace with something else (e.g. via
+#     `network_mode: service:<vpn-container>`) that already owns port 8000
+#     (gluetun's control server defaults to 8000, for example), set
+#     `environment: - PORT=8800` (or any free port) instead of fighting the
+#     other container's config — server.py/entrypoint.sh already honor $PORT.
+
+# ============================================================
+# Option A — NVIDIA (this host, per your confirmation)
+# ============================================================
+services:
+  pone-ttsmod:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime-cuda
+    image: pone-ttsmod:cuda
+    container_name: pone-ttsmod
+    restart: unless-stopped
+
+    # Requires the NVIDIA Container Toolkit (already confirmed working here).
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    ports:
+      - "8800:8800"           # drop this if only other containers need it
+
+    volumes:
+      - pone-ttsmod_release:/app/release
+      - pone-ttsmod_sfx_cache:/app/sfx_cache        # only ever populated by an outgoing fetch — remove this
+                                                # line too if you set MOSS_SFX_ALLOW_NETWORK=0 below
+      - ./server/voice_patch:/app/voice_patch  # optional pronunciation-fix LoRA; missing is non-fatal
+      - ./server/st_cache:/app/st_cache        # cache for the /st_cache/generate endpoint — visible/durable on the host
+
+    environment:
+      - MOSS_PERF_PRESET=balanced   # quality | balanced | low_vram | potato
+      # - MOSS_SFX_ALLOW_NETWORK=0  # uncomment to block /sfx from ever calling out to
+                                     # Freesound/BBC — it will only serve from its cache
+
+    networks:
+      - your_shared_network   # <- replace with whatever network your ST service is on
+
+volumes:
+  pone-ttsmod_release:
+  pone-ttsmod_sfx_cache:
+
+networks:
+  your_shared_network:
+    external: true            # or remove `external: true` if it's defined in this same file
+
+
+# ============================================================
+# Option B — AMD / ROCm (only if you later move this to the RX 7700S host —
+# NOT this server. Keep this commented out / unused here.)
+# ============================================================
+# services:
+#   pone-ttsmod:
+#     build:
+#       context: .
+#       dockerfile: Dockerfile
+#       target: runtime-rocm
+#     image: pone-ttsmod:rocm
+#     container_name: pone-ttsmod
+#     restart: unless-stopped
+#
+#     devices:
+#       - /dev/kfd
+#       - /dev/dri
+#     group_add:
+#       - video
+#       - render
+#     security_opt:
+#       - seccomp=unconfined
+#     cap_add:
+#       - SYS_PTRACE
+#     ipc: host
+#     shm_size: "8g"
+#
+#     ports:
+#       - "8800:8800"
+#
+#     volumes:
+#       - pone-ttsmod_release:/app/release
+#       - pone-ttsmod_sfx_cache:/app/sfx_cache
+#       - ./server/voice_patch:/app/voice_patch
+#       - ./server/st_cache:/app/st_cache
+#
+#     environment:
+#       - HSA_OVERRIDE_GFX_VERSION=11.0.0
+#       - MOSS_PERF_PRESET=balanced
+#       # - MOSS_SFX_ALLOW_NETWORK=0
+#
+#     networks:
+#       - your_shared_network
+#
+# volumes:
+#   pone-ttsmod_release:
+#   pone-ttsmod_sfx_cache:

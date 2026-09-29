@@ -1,0 +1,7 @@
+server/venv/
+server/release/
+server/.setup_done
+server/tts_server.log
+server/*.pyc
+server/__pycache__/
+.git/

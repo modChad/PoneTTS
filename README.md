@@ -1,93 +1,281 @@
 # PoneTTS
 
+Self-hosted text-to-speech server for the **[MOSS-TTS-PNY](https://huggingface.co/ZDisket/MOSS-TTS-PNY)** model, packaged for Docker.
 
+- 43 character voices: IDs 0–32 are My Little Pony, IDs 33–42 are Team Fortress 2
+- 48 kHz mono WAV output
+- Voice backend for **Pony Pony Paradise (PPP)** and **SillyTavern**
+- Browser test page, OpenAI-compatible and XTTSv2-compatible endpoints
 
-## Getting started
+> **AMD (ROCm) support is highly experimental.** NVIDIA is the supported path. The AMD image has run on exactly one machine (an RX 7700S laptop), and it needed manual workarounds to get there. Expect problems on other AMD cards.
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+[[_TOC_]]
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+## Requirements
 
-## Add your files
+| | NVIDIA (supported) | AMD (experimental) |
+|---|---|---|
+| OS | Linux | Linux |
+| GPU memory | ~6 GB minimum, see [presets](#performance-presets) | ~8 GB tested |
+| Host driver | `nvidia-smi` lists your card | `rocm-smi` lists your card |
+| Extra | [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) | User in the `video` and `render` groups |
+| Docker | Engine, Compose plugin, buildx | Engine, Compose plugin, buildx |
+| Disk | ~12 GB for the model, plus the image | ~12 GB for the model, plus a larger image |
 
-* [Create](https://docs.gitlab.com/user/project/repository/web_editor/#create-a-file) or [upload](https://docs.gitlab.com/user/project/repository/web_editor/#upload-a-file) files
-* [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
+The GPU driver must work **outside** Docker first. Docker only passes the GPU through; it can't fix a broken host driver.
 
+## Quick start
+
+```bash
+git clone <this repo> PoneTTS
+cd PoneTTS
+./run.sh 2>&1 | tee run.log
 ```
-cd existing_repo
-git remote add origin https://gitlab.com/ScrambledEgg/PoneTTS.git
-git branch -M main
-git push -uf origin main
+
+`run.sh`:
+
+1. Checks for the Docker CLI, Engine, Compose and buildx, and offers to install anything missing (pacman, apt, dnf or zypper). It always asks before installing.
+2. Detects your GPU vendor and VRAM, and on NVIDIA checks for the NVIDIA Container Toolkit.
+3. Suggests a performance preset. You can accept it or pick your own.
+4. Asks for a port (default `8800`) and whether `/sfx` may fetch sound effects from the internet.
+5. Writes `docker-compose.yml` for your hardware, including a RAM cap so running out of memory restarts the server instead of your desktop.
+6. Builds the image and starts it.
+
+**First start takes a while.** The container downloads the ~12 GB model into a Docker volume, which can take up to ~20 minutes. Later starts skip this.
+
+Watch it come up:
+
+```bash
+docker compose logs -f
 ```
 
-## Integrate with your tools
+It's ready when you see:
 
-* [Set up project integrations](https://gitlab.com/ScrambledEgg/PoneTTS/-/settings/integrations)
+```text
+[entrypoint] GPU visible: <your GPU>
+[server] ready. device=cuda ...
+```
 
-## Collaborate with your team
+Then open `http://localhost:8800/` for the test page.
 
-* [Invite team members and collaborators](https://docs.gitlab.com/user/project/members/)
-* [Create a new merge request](https://docs.gitlab.com/user/project/merge_requests/creating_merge_requests/)
-* [Automatically close issues from merge requests](https://docs.gitlab.com/user/project/issues/managing_issues/#closing-issues-automatically)
-* [Enable merge request approvals](https://docs.gitlab.com/user/project/merge_requests/approvals/)
-* [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
+## Adding it to an existing Compose setup
 
-## Test and Deploy
+To run PoneTTS alongside other services (e.g. SillyTavern), add a service block like this to your own `docker-compose.yml`:
 
-Use the built-in continuous integration in GitLab.
+```yaml
+services:
+  pone-ttsmod:
+    build:
+      context: /path/to/PoneTTS      # the folder, not a file inside it
+      dockerfile: Dockerfile
+      target: runtime-cuda           # runtime-rocm for AMD (experimental)
+    image: pone-ttsmod:cuda
+    container_name: pone-ttsmod
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    ports:
+      - "8800:8800"
+    volumes:
+      - pone-ttsmod_release:/app/release         # the model (~12 GB)
+      - pone-ttsmod_sfx_cache:/app/sfx_cache
+      - ./server/voice_patch:/app/voice_patch    # optional
+      - ./server/st_cache:/app/st_cache          # optional
+    environment:
+      - MOSS_PERF_PRESET=balanced
 
-* [Get started with GitLab CI/CD](https://docs.gitlab.com/ci/quick_start/)
-* [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/user/application_security/sast/)
-* [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/topics/autodevops/requirements/)
-* [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/user/clusters/agent/)
-* [Set up protected environments](https://docs.gitlab.com/ci/environments/protected_environments/)
+volumes:
+  pone-ttsmod_release:
+  pone-ttsmod_sfx_cache:
+```
 
-***
+- `context` must point at the PoneTTS **folder**. If it's missing, Docker builds from the wrong folder and fails with `"/server": not found`.
+- If you already built the image with `run.sh`, you can drop the `build:` block and keep `image: pone-ttsmod:cuda`.
+- Behind a VPN container (e.g. `network_mode: "service:gluetun"`), remove `ports:` and publish `8800` on the VPN container instead. The server uses port `8800` rather than `8000` so it doesn't clash with gluetun's control server.
 
-# Editing this README
+`docker-compose.snippet.yml` has full NVIDIA and AMD examples.
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
+To build the image by hand:
 
-## Suggestions for a good README
+```bash
+docker build --target runtime-cuda -t pone-ttsmod:cuda .   # NVIDIA
+docker build --target runtime-rocm -t pone-ttsmod:rocm .   # AMD (experimental)
+```
 
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+## Performance presets
 
-## Name
-Choose a self-explaining name for your project.
+Set with `MOSS_PERF_PRESET`, or switch live from the dropdown on the test page (the choice persists across restarts).
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+| Preset | VRAM | Notes |
+|---|---|---|
+| `quality` | ~14–16 GB | Fastest. Vocoder on the GPU (NVIDIA only; on AMD it runs on the CPU, same as `balanced`) |
+| `balanced` | ~9–12 GB | **Server default.** Model on the GPU, vocoder on the CPU |
+| `low_vram` | ~7–8 GB | Also skips CUDA-graph capture; shorter line cap |
+| `potato` | ~6 GB | As `low_vram` with the shortest line cap. Not quantized |
 
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
+The presets only trade speed and VRAM. Every preset uses the same voices and quality.
 
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
+`run.sh` suggests: under 7 GB `potato`, 7–9 GB `low_vram`, 9–12.5 GB `balanced`, above that `quality` (`balanced` on AMD).
 
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
+## Configuration
 
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
+Environment variables for the container:
 
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
+| Variable | Default | What it does |
+|---|---|---|
+| `MOSS_PERF_PRESET` | `balanced` | Performance preset (see above) |
+| `PORT` | `8800` | Port the server listens on inside the container |
+| `MOSS_AUDIO_TEMPERATURE` | `0.85` | Default sampling temperature. Lower is steadier, higher is more expressive |
+| `MOSS_SFX_ALLOW_NETWORK` | `1` | `0` makes `/sfx` serve only from its cache, with no outgoing requests |
+| `MOSS_FIX_STUCK_WORDS` | `1` | Detect and regenerate words that get stuck droning |
+| `MOSS_FIX_PRON` | `0` | Check rare words with Whisper and fix their pronunciation (slower) |
+| `MOSS_AUTO_RESPELL` | `0` | Automatically respell rare words phonetically |
+| `MOSS_DECODER_RUNTIME` | from preset | Override the vocoder: `onnx_cuda`, `onnx_cpu` or `onnx_hybrid` |
+| `HSA_OVERRIDE_GFX_VERSION` | `11.0.2` (AMD image) | AMD only: GPU architecture override. See [known issues](#known-issues) |
+| `HF_HUB_ENABLE_HF_TRANSFER` / `HF_HUB_DISABLE_XET` | `0` / `1` | The fast model downloaders are off by default; they got the container killed on test hardware |
 
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
+## API
 
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
+All endpoints are on `http://<host>:8800`.
 
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/` | Browser test page: pick a voice, type, listen |
+| `GET` | `/health` | Readiness check (`status`: `ok` or `loading`) |
+| `GET` | `/speakers` | List voices: `id`, `name`, `label`, `language` |
+| `GET` | `/gpu` | VRAM diagnostics |
+| `POST` | `/tts` | Main synthesis endpoint (see below) |
+| `GET` | `/tts?text=...&speaker_id=31` | Quick test from a browser or curl |
+| `GET` | `/normalize?text=...` | Preview the cleaned-up text the model will actually read |
+| `GET` / `POST` | `/preset` | Show or switch the performance preset (`POST /preset?name=low_vram`) |
+| `GET` / `POST` | `/voice_blend` | Voice-patch blend settings |
+| `GET` | `/sfx?query=...` | Sound effect for a short description (Freesound / BBC, cached) |
+| `POST` | `/v1/audio/speech` | OpenAI-compatible (SillyTavern). Always returns WAV |
+| `POST` | `/tts_to_audio/` | XTTSv2-compatible (SillyTavern) |
+| `GET` | `/tts_stream/` | XTTSv2-compatible streaming URL |
+| `POST` | `/set_tts_settings` | XTTSv2-compatible settings (accepted, ignored) |
+| `POST` | `/st_cache/generate` | Generate and cache a clip for a chat message |
+| `GET` | `/st_cache/...` | Download cached clips |
 
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
+### `POST /tts`
 
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
+```bash
+curl -X POST http://localhost:8800/tts \
+  -H "Content-Type: application/json" \
+  -d '{"text": "Hello from Ponyville!", "speaker_id": 31}' \
+  --output hello.wav
+```
+
+Only `text` is required. Useful optional fields:
+
+| Field | Default | Notes |
+|---|---|---|
+| `speaker_id` | `31` | See `GET /speakers` |
+| `format` | `wav` | `base64` returns JSON (`audio_b64`, `sample_rate`, `duration_sec`) |
+| `audio_temperature` | server default | `0` is deterministic; `0.7`–`0.9` is expressive |
+| `style_emotion_id` | none | `0`–`11`. If unset, a `[tag]` in the text is used, else Neutral |
+| `style_energy` | none | `0`–`1`. If unset, a `[tag]` in the text is used, else `0.5` |
+| `style_strength` | none | `1.0` is normal; higher exaggerates the emotion (max ~2.3) |
+| `max_new_tokens` | preset | Upper limit on generated length |
+| `trim_silence` | `true` | Shorten long pauses at punctuation |
+| `normalize` | `true` | Clean punctuation and symbols, apply respellings |
+| `expand_numbers` | `true` | `100` → "one hundred" |
+| `client_pronunciations` | `{}` | Per-request respellings, e.g. `{"Zecora": "Zeh core ah"}` |
+| `fix_stuck_words` | server default | Regenerate if a word gets stuck droning |
+
+Long text is split into clauses at `. ! ? : ;` and em-dashes, so paragraphs and poems don't get cut off.
+
+### Identifying your client
+
+Send an `X-Client-App` header (e.g. `X-Client-App: ppp`) so your requests show up by name in the server log:
+
+```text
+[req] 2026-09-28T22:03:58 client=ppp ip=172.18.0.1 POST /tts 200 1.84s
+```
+
+## SillyTavern
+
+Use either TTS provider:
+
+- **XTTSv2:** server URL `http://pone-ttsmod:8800`. SillyTavern fetches the voice list from `/speakers` automatically.
+- **OpenAI Compatible:** endpoint `http://pone-ttsmod:8800/v1/audio/speech`. This provider doesn't fetch voices, so type the speaker names you want (from `/speakers`) into its comma-separated voice list.
+
+Use the container name (`pone-ttsmod`) when SillyTavern runs in a container on the same Docker network. Otherwise use the host's IP address.
+
+## Pronunciation
+
+The model reads raw text with no phonetic dictionary, so some words come out wrong. Fix them in `server/pronunciations.txt`, one per line:
+
+```text
+beg = behg
+Zecora = Zeh core ah
+```
+
+- Matching is whole-word and case-insensitive.
+- The file reloads automatically; no restart needed.
+- Check a respelling with `GET /normalize?text=I+beg+you`.
+
+**Voice patch (optional):** drop `adapter_model.safetensors` into `server/voice_patch/` and restart. It improves pronunciation for low-screen-time characters (Maud, Zecora, Cheerilee, Celestia, ...). Without it the server runs on the base model.
+
+## Project layout
+
+```text
+.
+├── run.sh                      # Linux setup: prerequisites, GPU detection, compose file, build
+├── Dockerfile                  # Two build targets: runtime-cuda, runtime-rocm
+├── docker-compose.snippet.yml  # Example service blocks (NVIDIA and AMD)
+├── DISTRIBUTING.md             # Build notes for other machines
+├── VERSION.txt                 # Release notes and known issues
+└── server/
+    ├── server.py               # The HTTP server (FastAPI)
+    ├── entrypoint.sh           # Container start: download, patches, GPU check, launch
+    ├── download_model.py       # Fetches the model from HuggingFace
+    ├── apply_voice_patch.py    # Merges the optional voice patch
+    ├── patch_torchopt_bundle.py# Fixes a bug in the downloaded model runtime
+    ├── pronunciations.txt      # Your respellings
+    ├── voice_patch/            # Optional pronunciation LoRA
+    └── sfx_cache/              # Cached sound effects
+```
+
+`server/setup.sh`, `run_server.sh` and `tts.py` are the original bare-metal (non-Docker) launchers. See `server/README.md` for how to use them.
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| `unknown flag: --no-cache` | The Docker Compose plugin is missing. `run.sh` offers to install it |
+| Arch: `docker ... and docker-cli-bin ... are in conflict` | `docker` includes the CLI and replaces `docker-cli-bin`. Answer **y** when pacman asks |
+| `failed to get console: provided file is not a console` | Older `run.sh` piped to `tee`. Current `run.sh` handles this; by hand, set `COMPOSE_PROGRESS=plain` |
+| `fork/exec /usr/bin/docker-proxy: no such file or directory` | Reinstall Docker and restart the service, or set `{"userland-proxy": false}` in `/etc/docker/daemon.json` |
+| Container restarts during the model download | Usually memory. Check `docker compose logs`: the entrypoint prints the exit code and free disk space |
+| `torch.cuda.is_available() is False` | GPU not passed through: check the NVIDIA Container Toolkit (NVIDIA), or the `/dev/kfd` and `/dev/dri` devices (AMD) |
+| Can't reach the server from the browser | Check `docker compose ps` and your port mapping. After a kernel update on Arch, reboot so Docker's networking modules load |
+| `Temporary failure in name resolution` in the log | The container has no network. Same fix as above |
+
+## Known issues
+
+- **AMD is highly experimental** (see the note at the top).
+- The AMD image sets `HSA_OVERRIDE_GFX_VERSION=11.0.2` (RX 7700S) for every AMD card. Other cards may need a different value or none at all.
+- The NVIDIA image hasn't yet been confirmed running on real hardware.
+
+## Credits
+
+- Model: **MOSS-TTS-PNY** by ZDisket, <https://huggingface.co/ZDisket/MOSS-TTS-PNY>
+- This is an unofficial fan project. It is not affiliated with or endorsed by Hasbro or Valve. My Little Pony and Team Fortress 2 are trademarks of their respective owners.
 
 ## License
-For open source projects, say how it is licensed.
 
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+PoneTTS's own code (the Dockerfile, scripts and server) is licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE), the same licence as Pony Pony Paradise.
+
+In short: you can use, copy, modify and share it freely for any **noncommercial** purpose. You may not use it in a commercial product. This is a "source-available" licence rather than an OSI-approved open-source one, because of the noncommercial restriction.
+
+Not covered by this licence:
+
+- **The MOSS-TTS-PNY model.** It's downloaded from HuggingFace at first start, not included here, and has its own terms. See the [model card](https://huggingface.co/ZDisket/MOSS-TTS-PNY).
+- **Sound effects in `server/sfx_cache/`.** These come from Freesound and the BBC Sound Effects archive and stay under their original licences.
+- **Characters and voices.** My Little Pony and Team Fortress 2 characters belong to their respective owners.

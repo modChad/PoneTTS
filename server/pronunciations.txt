@@ -1,0 +1,26 @@
+# Pronunciation overrides for MOSS-TTS.
+#
+# The model has no phonemizer — it reads the raw text — so some words just come
+# out wrong (e.g. it says "beg" like "borg"). The only fix is to spell the word
+# the way you want it to SOUND. Add one entry per line:
+#
+#     word = respelling
+#
+# - Matched whole-word and case-insensitive ("beg" also catches "Beg", but NOT
+#   "begging" or "began" — only the exact word).
+# - The respelling can be multiple words / made-up spelling; whatever makes the
+#   model say it right. Experiment, then check it with:
+#       curl "http://127.0.0.1:8000/normalize?text=I+beg+you"
+#   or just listen — the file HOT-RELOADS, so no restart needed. Edit, re-request.
+#
+# Tips for coaxing the right sound:
+# - Split into syllables with spaces:   colonel = ker nel
+# - Double letters / add vowels to hit a vowel:   beg = behg     roof = ruhf
+# - Respell phonetically:   Rarity = Rare it ee     Zecora = Zeh core ah
+# - For names it mangles, spell them how they sound.
+#
+# Seed examples (tune or delete these — they're just starting guesses):
+beg = behg
+colonel = kernel
+# Add words here as you catch the model saying them wrong. Spell what you HEAR,
+# in syllables, e.g.:   genre = zhon ra      hyperbole = hy per buh lee
