@@ -43,21 +43,21 @@ Set `MOSS_PERF_PRESET` in the compose file's `environment:` block:
 | Preset     | VRAM tier    | Vocoder location |
 |------------|--------------|-------------------|
 | `quality`  | ~14-16 GB    | GPU (`onnx_cuda`) |
-| `balanced` | ~9-12 GB     | CPU (`onnx_cpu`)  |
+| `balanced` | ~10-12 GB    | CPU (`onnx_cpu`)  |
 | `low_vram` | ~7-8 GB      | CPU (`onnx_cpu`)  |
-| `potato`   | ~6 GB        | CPU (`onnx_cpu`)  |
+| `potato`   | weakest cards| CPU (`onnx_cpu`)  |
 
-The default is `balanced`. On a 14 GB+ NVIDIA card, `quality` is faster.
-Once you pick a preset from the test page's dropdown, that choice is saved
-and wins over `MOSS_PERF_PRESET`. Only `quality` uses the GPU vocoder
+If you have more VRAM than the person who originally set this up, you
+probably want `quality` or `balanced` rather than the `low_vram` default —
+that's the whole point of a bigger card. Only `quality` uses the GPU vocoder
 path; if you hit an error specifically mentioning `onnxruntime`, `cuDNN`, or
 CUDA execution providers on that preset, that's the first place to look —
 this path is untested by us beyond static code review, since our own
 hardware only exercises `low_vram`.
 
 ## 4. First start takes a while — that's expected
-The first container start downloads the ~12GB model (and applies the voice
-patch, if you added it) before the server is reachable at all (up to the ~20 minute healthcheck
+The first container start downloads the ~12GB model and applies a voice
+patch before the server is reachable at all (up to the ~20 minute healthcheck
 grace period). `docker compose logs -f pone-ttsmod` to watch progress. Subsequent
 restarts skip this (it's cached in the `pone-ttsmod_release` volume) unless that
 volume is deleted.

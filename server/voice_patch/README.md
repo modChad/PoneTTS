@@ -6,8 +6,5 @@ Mrs. Cake, ...). Trained on a speaker-rebalanced mix of the same public show
 audio the base model used, so every character gets equal learning exposure.
 Voice identity and the emotion/energy controls are untouched.
 
-**Not included in this repo:** only `adapter_config.json` ships. Put
-`adapter_model.safetensors` in this folder and it's applied automatically by
-`apply_voice_patch.py` on the next setup or container start (merged into the
-downloaded checkpoint; the unpatched original is kept next to it). Without it
-the server runs on the base model.
+Applied automatically during setup by `apply_voice_patch.py` (merged into the
+downloaded checkpoint; the unpatched original is kept next to it).

@@ -10,9 +10,10 @@
 #   - release/ (the ~12 GB model) lives in a named volume so it survives
 #     rebuilds and isn't baked into the image.
 #   - If pone-ttsmod shares a network namespace with something else (e.g. via
-#     `network_mode: service:<vpn-container>`), remove `ports:` here and publish
-#     the port on that container instead. The default 8800 avoids gluetun's
-#     control server on 8000; set `PORT=` in environment to change it.
+#     `network_mode: service:<vpn-container>`) that already owns port 8000
+#     (gluetun's control server defaults to 8000, for example), set
+#     `environment: - PORT=8800` (or any free port) instead of fighting the
+#     other container's config — server.py/entrypoint.sh already honor $PORT.
 
 # ============================================================
 # Option A — NVIDIA (this host, per your confirmation)
@@ -37,13 +38,15 @@ services:
               capabilities: [gpu]
 
     ports:
-      - "127.0.0.1:8800:8800" # this machine only; use "8800:8800" for your LAN, or drop if only other containers need it
+      - "8800:8800"           # drop this if only other containers need it
 
     volumes:
       - pone-ttsmod_release:/app/release
-      - pone-ttsmod_sfx_cache:/app/sfx_cache        # keeps sounds fetched at runtime across rebuilds
+      - pone-ttsmod_sfx_cache:/app/sfx_cache        # only ever populated by an outgoing fetch — remove this
+                                                # line too if you set MOSS_SFX_ALLOW_NETWORK=0 below
       - ./server/voice_patch:/app/voice_patch  # optional pronunciation-fix LoRA; missing is non-fatal
       - ./server/st_cache:/app/st_cache        # cache for the /st_cache/generate endpoint — visible/durable on the host
+      - ./server/history:/app/history          # every generated line, playable from the web page (MOSS_HISTORY_MAX)
 
     environment:
       - MOSS_PERF_PRESET=balanced   # quality | balanced | low_vram | potato
@@ -90,16 +93,17 @@ networks:
 #     shm_size: "8g"
 #
 #     ports:
-#       - "127.0.0.1:8800:8800"
+#       - "8800:8800"
 #
 #     volumes:
 #       - pone-ttsmod_release:/app/release
 #       - pone-ttsmod_sfx_cache:/app/sfx_cache
 #       - ./server/voice_patch:/app/voice_patch
 #       - ./server/st_cache:/app/st_cache
+#       - ./server/history:/app/history
 #
 #     environment:
-#       - HSA_OVERRIDE_GFX_VERSION=11.0.2   # RX 7700S (gfx1102); other cards may differ
+#       - HSA_OVERRIDE_GFX_VERSION=11.0.0
 #       - MOSS_PERF_PRESET=balanced
 #       # - MOSS_SFX_ALLOW_NETWORK=0
 #

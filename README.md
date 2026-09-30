@@ -86,6 +86,7 @@ services:
       - pone-ttsmod_sfx_cache:/app/sfx_cache
       - ./server/voice_patch:/app/voice_patch    # optional
       - ./server/st_cache:/app/st_cache          # optional
+      - ./server/history:/app/history            # optional: keeps saved clips on the host
     environment:
       - MOSS_PERF_PRESET=balanced
 
@@ -133,10 +134,14 @@ Environment variables for the container:
 | `MOSS_AUDIO_TEMPERATURE` | `0.85` | Default sampling temperature. Lower is steadier, higher is more expressive |
 | `MOSS_SFX_ALLOW_NETWORK` | `1` | `0` makes `/sfx` serve only from its cache, with no outgoing requests |
 | `MOSS_FIX_STUCK_WORDS` | `1` | Detect and regenerate words that get stuck droning. Runs Whisper on every sentence; `0` is much faster |
-| `MOSS_LOOP_GUARD_REL_MULT` | `1.6` | A sentence this many times longer than expected is checked with Whisper for repeats, and trimmed to one reading |
+| `MOSS_LOOP_GUARD_REL_MULT` | `1.6` | A sentence this many times longer than expected (or one that hits its length limit) is checked with Whisper for repeats and failures |
+| `MOSS_LOOP_GUARD_MIN_HEARD` | `0.5` | If Whisper hears less than this share of a checked sentence's words, the sentence counts as failed and is regenerated |
+| `MOSS_FAILED_CLAUSE_RETRIES` | `2` | How many times a failed sentence is regenerated before it's sent as-is |
+| `MOSS_COMMA_SPLIT_MIN_WORDS` | `20` | Sentences longer than this are also split at commas (lists are kept together). `0` turns comma splitting off |
 | `MOSS_FIX_PRON` | `0` | Check rare words with Whisper and fix their pronunciation (slower) |
 | `MOSS_AUTO_RESPELL` | `0` | Automatically respell rare words phonetically |
 | `MOSS_DECODER_RUNTIME` | from preset | Override the vocoder: `onnx_cuda`, `onnx_cpu` or `onnx_hybrid` |
+| `MOSS_HISTORY_MAX` | `500` | How many generated lines to keep in the history (oldest deleted first). `0` turns history off |
 | `HSA_OVERRIDE_GFX_VERSION` | `11.0.2` (AMD image) | AMD only: GPU architecture override. See [known issues](#known-issues) |
 | `HF_HUB_ENABLE_HF_TRANSFER` / `HF_HUB_DISABLE_XET` | `0` / `1` | The fast model downloaders are off by default; they got the container killed on test hardware |
 
@@ -146,10 +151,14 @@ All endpoints are on `http://<host>:8800`.
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/` | Browser test page: pick a voice, type, listen |
+| `GET` | `/` | Browser test page: generate, stop generations, browse and play the history |
 | `GET` | `/health` | Readiness check (`status`: `ok` or `loading`) |
 | `GET` | `/speakers` | List voices: `id`, `name`, `label`, `language` |
 | `GET` | `/gpu` | VRAM diagnostics |
+| `POST` | `/cancel?scope=mine` | Stop the caller's own generations (matched by `X-Client-App`). `scope=all` stops everyone's |
+| `GET` | `/history` | Saved generations, newest first. Filters: `voice`, `client`, `limit` |
+| `GET` | `/history/files/<id>.wav` | Play or download a saved generation |
+| `DELETE` | `/history/<id>` | Delete one saved generation (`DELETE /history` deletes all) |
 | `POST` | `/tts` | Main synthesis endpoint (see below) |
 | `GET` | `/tts?text=...&speaker_id=31` | Quick test from a browser or curl |
 | `GET` | `/normalize?text=...` | Preview the cleaned-up text the model will actually read |
@@ -189,7 +198,28 @@ Only `text` is required. Useful optional fields:
 | `client_pronunciations` | `{}` | Per-request respellings, e.g. `{"Zecora": "Zeh core ah"}` |
 | `fix_stuck_words` | server default | Regenerate if a word gets stuck droning |
 
-Long text is split into clauses at `. ! ? : ;` and em-dashes, so paragraphs and poems don't get cut off.
+Long text is split into clauses at `. ! ? : ;` and em-dashes, so paragraphs and poems don't get cut off. Sentences over 20 words are also split at commas, packed into pieces of about 5–15 words; commas beside short list items (including an Oxford comma) are never split.
+
+### Stopping generations
+
+`POST /cancel` stops generations **between sentences**: the sentence being generated when you cancel still finishes (the model's own code can't be interrupted mid-sentence), then that request stops, and queued requests never start. Cancelled requests get HTTP `409` with `"detail": "cancelled"`. Requests that arrive after the cancel are unaffected.
+
+- `scope=mine` only stops requests from the same client, going by the `X-Client-App` header.
+- `scope=all` stops every client's requests.
+
+The test page has **Stop mine** and **Stop all** buttons, and a live line showing what the server is generating and how many requests are queued (also in `GET /health` under `activity`).
+
+### History
+
+Every successfully generated line is saved to `server/history/` as a WAV plus a `.json` with its details (full text, voice, client, duration, temperature, preset). File names sort by time and are readable:
+
+```text
+20260930-200612-345_twilight_so-a-brilliant-mind-could-forge.wav
+```
+
+The newest `MOSS_HISTORY_MAX` (default 500, roughly 500 MB) are kept. The test page lists them with play, download and delete, filterable by voice and client. Mount `./server/history` to keep them across container rebuilds.
+
+> Anyone who can reach the server can list and play the history, since there's no login.
 
 ### Identifying your client
 
@@ -240,6 +270,7 @@ Zecora = Zeh core ah
     ├── patch_torchopt_bundle.py# Fixes a bug in the downloaded model runtime
     ├── pronunciations.txt      # Your respellings
     ├── voice_patch/            # Optional pronunciation LoRA
+    ├── history/                # Saved generations (created at runtime)
     └── sfx_cache/              # Cached sound effects
 ```
 

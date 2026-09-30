@@ -117,6 +117,27 @@ KNOWN ISSUES
 
 CHANGES IN THIS RELEASE
 -----------------------
+  - Stop generations: POST /cancel?scope=mine|all, plus "Stop mine" and
+    "Stop all" buttons on the web page. Stops between sentences (the
+    current one finishes); queued requests never start; later requests are
+    unaffected. /health now lists active and queued requests ("activity"),
+    shown live on the page
+  - Generation history: every generated line is saved to server/history/ as
+    <time>_<voice>_<first-words>.wav + .json, newest 500 kept
+    (MOSS_HISTORY_MAX, 0 = off). Web page lists them with play, download,
+    delete and voice/client filters. run.sh and the compose snippet mount
+    ./server/history
+  - Long sentences (over 20 words) are also split at commas, packed into
+    5-15 word pieces with a short 0.12s gap. Commas beside short list items
+    are never split, so lists and Oxford commas stay together
+    (MOSS_COMMA_SPLIT_MIN_WORDS)
+  - Loop guard cuts repeats by finding where the sentence's ending first
+    appears in the transcript, so partial repeats ("...is complete? ...is
+    complete?") are caught too; the old word-count rule is kept as a fallback
+  - Failed sentences (the loop guard hears under half the words: silence,
+    hiss or gibberish) are regenerated up to twice, whatever
+    MOSS_FIX_STUCK_WORDS is set to (MOSS_LOOP_GUARD_MIN_HEARD,
+    MOSS_FAILED_CLAUSE_RETRIES)
   - Loop guard now also checks sentences that run more than 1.6x their
     expected length (MOSS_LOOP_GUARD_REL_MULT), not only ones that hit the
     token cap. Catches clean double reads, which end on their own well inside

@@ -47,11 +47,9 @@ if [ ! -f "$MARKER" ]; then
     echo "[entrypoint] first-run setup complete."
 fi
 
-# The dropdown's preset choice is saved in the model volume so it survives the
-# container being recreated. MOSS_PERF_PRESET is only used until one is saved.
-export MOSS_PRESET_FILE="$PWD/release/preset.conf"
-if [ -f "$MOSS_PRESET_FILE" ]; then
-    echo "[entrypoint] using saved preset: $(cat "$MOSS_PRESET_FILE") (delete release/preset.conf in the volume to go back to MOSS_PERF_PRESET)"
+if [ -n "${MOSS_PERF_PRESET:-}" ] && [ ! -f preset.conf ]; then
+    echo "${MOSS_PERF_PRESET}" > preset.conf
+    echo "[entrypoint] performance preset set to: ${MOSS_PERF_PRESET}"
 fi
 
 # --- Reapply the voice patch on every start, not just first-run. It's

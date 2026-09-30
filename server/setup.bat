@@ -49,9 +49,6 @@ echo [4/5] Downloading the voice model from HuggingFace (~12 GB, one time)...
 REM --- sanity check the model bundle downloaded (runtime is used as-is) ---
 if not exist "release\moss_tts_torchopt_runner_bundle\portable_tts_runtime.py" ( echo Model bundle missing - download may have failed. & pause & exit /b 1 )
 
-REM --- fix a NameError in the downloaded runtime (see patch_torchopt_bundle.py) ---
-"%VPY%" patch_torchopt_bundle.py || ( echo Runtime fix failed. & pause & exit /b 1 )
-
 REM --- v2.5 voice patch (pronunciation fine-tune, merged into the model once) ---
 echo [5/5] Applying the v2.5 voice patch (a few minutes)...
 "%VPY%" apply_voice_patch.py || ( echo Voice patch failed. & pause & exit /b 1 )

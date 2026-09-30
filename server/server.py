@@ -912,7 +912,138 @@ async def _request_log_middleware(request: Request, call_next):
     return response
 
 
-def _synthesize(req: TTSRequest) -> dict:
+# ----------------------------------------------------------------------------
+# Cancelling generations (POST /cancel). Generation can't be interrupted
+# mid-sentence (that happens inside the model's own code), so a cancel stops a
+# request before its NEXT sentence: running requests stop after the current
+# sentence, queued ones give up as soon as they reach the model. Cancels are
+# counters: a request remembers the counters it started with, and is cancelled
+# if either has moved on ("all", or its own client's) - so a cancel never
+# affects requests that arrive after it.
+# ----------------------------------------------------------------------------
+_cancel_lock = threading.Lock()
+_cancel_all_gen = 0
+_cancel_client_gen: dict[str, int] = {}
+_active_tickets: list = []
+_tl = threading.local()           # the ticket of the request this thread is serving
+
+
+class _Ticket:
+    __slots__ = ("client", "text", "started", "all_gen", "client_gen", "state")
+
+    def __init__(self, client: str, text: str):
+        self.client = client
+        self.text = text
+        self.started = time.time()
+        self.all_gen = _cancel_all_gen
+        self.client_gen = _cancel_client_gen.get(client, 0)
+        self.state = "queued"     # queued -> generating
+
+
+def _ticket_open(client: str, text: str) -> "_Ticket":
+    with _cancel_lock:
+        t = _Ticket(client, text)
+        _active_tickets.append(t)
+        return t
+
+
+def _ticket_close(t: "_Ticket") -> None:
+    with _cancel_lock:
+        if t in _active_tickets:
+            _active_tickets.remove(t)
+
+
+def _check_cancelled() -> None:
+    """Raise if the current request has been cancelled. Called right before
+    each sentence is generated (after waiting for the model), so it covers
+    queued requests, the gap between sentences, and retries."""
+    t = getattr(_tl, "ticket", None)
+    if t is None:
+        return
+    if t.all_gen != _cancel_all_gen or t.client_gen != _cancel_client_gen.get(t.client, 0):
+        raise HTTPException(status_code=409, detail="cancelled")
+    t.state = "generating"
+
+
+def _activity() -> list[dict]:
+    now = time.time()
+    with _cancel_lock:
+        return [{"client": t.client, "text": t.text[:80], "state": t.state,
+                 "seconds": round(now - t.started, 1)} for t in _active_tickets]
+
+
+# ----------------------------------------------------------------------------
+# Generation history: every successfully generated line is saved to
+# history/ as <time>_<voice>_<first-words>.wav plus a matching .json with the
+# details, newest MOSS_HISTORY_MAX kept (0 = off). Browsable and playable from
+# the web page; the files are plain WAVs on disk if the folder is mounted.
+# ----------------------------------------------------------------------------
+HISTORY_DIR = PROJECT_DIR / "history"
+HISTORY_MAX = int(os.environ.get("MOSS_HISTORY_MAX", "500"))
+_history_lock = threading.Lock()
+_HISTORY_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+HISTORY_DIR.mkdir(parents=True, exist_ok=True)   # exists even when off, for the static mount
+
+
+def _slug(s: str, max_len: int) -> str:
+    s = re.sub(r"[^a-z0-9]+", "-", (s or "").lower()).strip("-")
+    return s[:max_len].rstrip("-") or "x"
+
+
+def _speaker_name(speaker_id: int) -> str:
+    for sp in SPEAKERS:
+        if sp["id"] == speaker_id:
+            return sp.get("name") or str(speaker_id)
+    return str(speaker_id)
+
+
+def _history_add(out: dict, req: "TTSRequest", client: str) -> None:
+    if HISTORY_MAX <= 0:
+        return
+    try:
+        now = datetime.now()
+        voice = _speaker_name(req.speaker_id)
+        words = " ".join(re.sub(r"^\s*\[[^\]]*\]\s*", "", req.text).split()[:6])
+        hid = f"{now.strftime('%Y%m%d-%H%M%S')}-{now.microsecond // 1000:03d}_{_slug(voice, 20)}_{_slug(words, 40)}"
+        meta = {
+            "id": hid,
+            "time": now.isoformat(timespec="seconds"),
+            "speaker_id": req.speaker_id,
+            "voice": voice,
+            "client": client,
+            "text": req.text,
+            "duration_sec": round(float(out.get("duration_sec", 0.0)), 2),
+            "temperature": req.audio_temperature if req.audio_temperature is not None
+                           else _default_audio_temperature,
+            "preset": _active_preset,
+        }
+        with _history_lock:
+            (HISTORY_DIR / f"{hid}.wav").write_bytes(out["wav"])
+            (HISTORY_DIR / f"{hid}.json").write_text(json.dumps(meta), encoding="utf-8")
+            # prune: names start with the timestamp, so sorting = oldest first
+            wavs = sorted(HISTORY_DIR.glob("*.wav"))
+            for old in wavs[:max(0, len(wavs) - HISTORY_MAX)]:
+                old.unlink(missing_ok=True)
+                old.with_suffix(".json").unlink(missing_ok=True)
+    except Exception as exc:  # noqa: BLE001 - history must never break a request
+        print(f"[history] not saved ({exc})", flush=True)
+
+
+def _synthesize(req: TTSRequest, client: str = "unspecified") -> dict:
+    """Entry point for every generating endpoint: tracks the request so it can
+    be cancelled (and shown as active), then saves the result to history."""
+    ticket = _ticket_open(client, req.text)
+    _tl.ticket = ticket
+    try:
+        out = _synthesize_inner(req)
+    finally:
+        _tl.ticket = None
+        _ticket_close(ticket)
+    _history_add(out, req, client)
+    return out
+
+
+def _synthesize_inner(req: TTSRequest) -> dict:
     if req.speaker_id not in SPEAKER_IDS:
         raise HTTPException(
             status_code=400,
@@ -1232,6 +1363,7 @@ def _synth_once(text: str, req: TTSRequest, mnt: int, temp: float,
                 emo_id: int, energy: float, strength: Optional[float] = None) -> dict:
     text = text.replace("—", ", ")   # pause marks are for _synth_pauses, never the model
     with _lock:
+        _check_cancelled()   # queued, between sentences, or before a retry
         _blend_sync_for_speaker(req.speaker_id)
         # emotion over-drive: the model's conditioner takes a strength multiplier
         # (config.style_feature_scale); it's read per forward pass, so set it per
@@ -1496,6 +1628,8 @@ def health():
         "reloading": _reload_state["busy"],
         "reload_target": _reload_state["target"],
         "reload_error": _reload_state["error"],
+        "activity": _activity(),
+        "history": HISTORY_MAX > 0,
     }
 
 
@@ -1879,12 +2013,13 @@ def _audio_response(out: dict, fmt: str) -> Response:
 
 
 @app.post("/tts")
-def tts_post(req: TTSRequest):
-    return _audio_response(_synthesize(req), req.format)
+def tts_post(req: TTSRequest, request: Request):
+    return _audio_response(_synthesize(req, _client_app(request)), req.format)
 
 
 @app.get("/tts")
 def tts_get(
+    request: Request,
     text: str = Query(..., min_length=1),
     speaker_id: int = 31,
     language: str = "en",
@@ -1906,7 +2041,7 @@ def tts_get(
         silence_max_gap_ms=silence_max_gap_ms,
         normalize=normalize,
     )
-    return _audio_response(_synthesize(req), req.format)
+    return _audio_response(_synthesize(req, _client_app(request)), req.format)
 
 
 # ----------------------------------------------------------------------------
@@ -1975,7 +2110,7 @@ class XTTSCompatRequest(BaseModel):
 
 
 @app.post("/tts_to_audio/")
-def xtts_compat_generate(req: XTTSCompatRequest):
+def xtts_compat_generate(req: XTTSCompatRequest, request: Request):
     """POST body: {"text", "speaker_wav", "language"} -> raw audio/wav bytes."""
     tts_req = TTSRequest(
         text=req.text,
@@ -1983,12 +2118,13 @@ def xtts_compat_generate(req: XTTSCompatRequest):
         language=req.language,
         format="wav",
     )
-    out = _synthesize(tts_req)
+    out = _synthesize(tts_req, _client_app(request))
     return Response(content=out["wav"], media_type="audio/wav")
 
 
 @app.get("/tts_stream/")
 def xtts_compat_stream(
+    request: Request,
     text: str = Query(..., min_length=1),
     speaker_wav: str = Query(...),
     language: str = "en",
@@ -2000,7 +2136,7 @@ def xtts_compat_stream(
         language=language,
         format="wav",
     )
-    out = _synthesize(tts_req)
+    out = _synthesize(tts_req, _client_app(request))
     return Response(content=out["wav"], media_type="audio/wav")
 
 
@@ -2037,13 +2173,13 @@ class OpenAISpeechRequest(BaseModel):
 
 
 @app.post("/v1/audio/speech")
-def openai_compat_generate(req: OpenAISpeechRequest):
+def openai_compat_generate(req: OpenAISpeechRequest, request: Request):
     tts_req = TTSRequest(
         text=req.input,
         speaker_id=_speaker_id_from_name(req.voice),
         format="wav",
     )
-    out = _synthesize(tts_req)
+    out = _synthesize(tts_req, _client_app(request))
     return Response(content=out["wav"], media_type="audio/wav")
 
 
@@ -2059,6 +2195,74 @@ def openai_compat_generate(req: OpenAISpeechRequest):
 ST_CACHE_DIR = Path(__file__).resolve().parent / "st_cache"
 ST_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/st_cache", StaticFiles(directory=str(ST_CACHE_DIR)), name="st_cache")
+app.mount("/history/files", StaticFiles(directory=str(HISTORY_DIR)), name="history_files")
+
+
+@app.post("/cancel")
+def cancel(request: Request, scope: str = Query("mine", description="mine|all")):
+    """Cancel generations: scope=mine cancels the caller's own client's
+    requests (by X-Client-App), scope=all cancels everyone's. Running requests
+    stop after their current sentence; queued ones never start."""
+    global _cancel_all_gen
+    if scope not in ("mine", "all"):
+        raise HTTPException(status_code=400, detail="scope must be 'mine' or 'all'")
+    client = _client_app(request)
+    with _cancel_lock:
+        if scope == "all":
+            _cancel_all_gen += 1
+            hit = len(_active_tickets)
+        else:
+            _cancel_client_gen[client] = _cancel_client_gen.get(client, 0) + 1
+            hit = sum(1 for t in _active_tickets if t.client == client)
+    print(f"[cancel] scope={scope} by client={client}: {hit} request(s) cancelled", flush=True)
+    return {"scope": scope, "client": client, "cancelled": hit}
+
+
+@app.get("/history")
+def history_list(limit: int = Query(200, ge=1, le=5000),
+                 voice: Optional[str] = None, client: Optional[str] = None):
+    """Saved generations, newest first. Optional filters: voice, client."""
+    items = []
+    with _history_lock:
+        metas = sorted(HISTORY_DIR.glob("*.json"), reverse=True)
+    for m in metas:
+        try:
+            meta = json.loads(m.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if voice and meta.get("voice") != voice:
+            continue
+        if client and meta.get("client") != client:
+            continue
+        meta["url"] = f"/history/files/{meta['id']}.wav"
+        items.append(meta)
+        if len(items) >= limit:
+            break
+    return {"enabled": HISTORY_MAX > 0, "max": HISTORY_MAX, "items": items}
+
+
+@app.delete("/history/{hid}")
+def history_delete(hid: str):
+    if not _HISTORY_ID_RE.match(hid):
+        raise HTTPException(status_code=400, detail="bad id")
+    with _history_lock:
+        wav = HISTORY_DIR / f"{hid}.wav"
+        if not wav.exists():
+            raise HTTPException(status_code=404, detail="not found")
+        wav.unlink(missing_ok=True)
+        wav.with_suffix(".json").unlink(missing_ok=True)
+    return {"deleted": hid}
+
+
+@app.delete("/history")
+def history_clear():
+    n = 0
+    with _history_lock:
+        for f in HISTORY_DIR.glob("*.wav"):
+            f.unlink(missing_ok=True)
+            f.with_suffix(".json").unlink(missing_ok=True)
+            n += 1
+    return {"deleted": n}
 
 
 def _safe_path_component(s: str, fallback: str = "untitled", max_len: int = 80) -> str:
@@ -2091,7 +2295,7 @@ class STCacheGenerateRequest(BaseModel):
 
 
 @app.post("/st_cache/generate")
-def st_cache_generate(req: STCacheGenerateRequest):
+def st_cache_generate(req: STCacheGenerateRequest, request: Request):
     speaker_id = req.speaker_id if req.speaker_id is not None else _speaker_id_from_name(req.character)
     tts_req = TTSRequest(
         text=req.text,
@@ -2106,7 +2310,7 @@ def st_cache_generate(req: STCacheGenerateRequest):
         style_energy=req.style_energy,
         style_strength=req.style_strength,
     )
-    out = _synthesize(tts_req)
+    out = _synthesize(tts_req, _client_app(request))
 
     chat_slug = _safe_path_component(req.chat_name, "chat")
     character_slug = _safe_path_component(req.character, "speaker")
@@ -2124,18 +2328,98 @@ def st_cache_generate(req: STCacheGenerateRequest):
     )
 
 
+# Stop buttons, live activity line and the History list for the web page.
+# Plain string (not an f-string) so the JavaScript can use normal braces.
+# Every history value is inserted with textContent / attributes, never as HTML:
+# the texts come from any client.
+_PAGE_EXTRA_JS = """<script>
+const $ = id => document.getElementById(id);
+async function stopGen(scope){
+  if(scope==='all' && !confirm('Stop every generation, including the VN and SillyTavern?')) return;
+  try{
+    const r=await fetch('/cancel?scope='+scope,{method:'POST',headers:{'X-Client-App':'webui'}});
+    const j=await r.json();
+    $('st').textContent='stop sent: '+j.cancelled+' request(s) cancelled (current sentence finishes first)';
+  }catch(e){ $('st').textContent='stop failed: '+e; }
+  if(scope==='mine' && genCtl) genCtl.abort();
+}
+async function pollActivity(){
+  try{
+    const h=await (await fetch('/health')).json();
+    const a=h.activity||[];
+    if(!a.length){ $('act').textContent='server idle'; }
+    else{
+      const g=a.filter(x=>x.state==='generating'), q=a.length-g.length;
+      $('act').textContent='busy: '+(g.length?('generating for '+g[0].client+' ('+g[0].seconds+'s) - "'+g[0].text+'"'):'starting')+
+        (q?(' | '+q+' queued'):'');
+    }
+  }catch(e){ $('act').textContent=''; }
+  setTimeout(pollActivity,2000);
+}
+function el(tag, cls, text){ const e=document.createElement(tag); if(cls) e.className=cls; if(text!==undefined) e.textContent=text; return e; }
+function fillFilter(sel, values){
+  const cur=sel.value, first=sel.options[0];
+  sel.replaceChildren(first);
+  for(const v of values){ const o=el('option','',v); o.value=v; sel.appendChild(o); }
+  sel.value=values.includes(cur)?cur:'';
+}
+let histAll=[];
+async function loadHistory(){
+  const q=new URLSearchParams({limit:'500'});
+  if($('hvoice').value) q.set('voice',$('hvoice').value);
+  if($('hclient').value) q.set('client',$('hclient').value);
+  let j;
+  try{ j=await (await fetch('/history?'+q)).json(); }catch(e){ $('hstat').textContent='could not load history'; return; }
+  if(!j.enabled){ $('hstat').textContent='History is off (MOSS_HISTORY_MAX=0).'; $('hist').replaceChildren(); return; }
+  if(!$('hvoice').value && !$('hclient').value){
+    histAll=j.items;
+    fillFilter($('hvoice'), [...new Set(histAll.map(x=>x.voice))].sort());
+    fillFilter($('hclient'), [...new Set(histAll.map(x=>x.client))].sort());
+  }
+  $('hstat').textContent=j.items.length+' shown (keeps the newest '+j.max+')';
+  const list=$('hist'); list.replaceChildren();
+  for(const it of j.items){
+    const row=el('div','h');
+    row.appendChild(el('div','meta', it.time.replace('T',' ')+'  ·  '+it.voice+'  ·  '+it.client+'  ·  '+it.duration_sec+'s  ·  temp '+it.temperature));
+    const t=el('div','txt', it.text); t.title='click to show all'; t.onclick=()=>t.classList.toggle('open');
+    row.appendChild(t);
+    const au=el('audio'); au.controls=true; au.preload='none'; au.src=it.url; row.appendChild(au);
+    const acts=el('div','acts');
+    const dl=el('a','', 'download'); dl.href=it.url; dl.download=it.id+'.wav'; acts.appendChild(dl);
+    const del=el('button','', 'delete');
+    del.onclick=async()=>{ if(!confirm('Delete this clip?')) return;
+      const r=await fetch('/history/'+encodeURIComponent(it.id),{method:'DELETE'}); if(r.ok) row.remove(); };
+    acts.appendChild(del); row.appendChild(acts);
+    list.appendChild(row);
+  }
+}
+async function clearHistory(){
+  if(!confirm('Delete ALL saved clips?')) return;
+  await fetch('/history',{method:'DELETE'}); loadHistory();
+}
+pollActivity(); loadHistory();
+</script></body></html>"""
+
+
 @app.get("/", response_class=HTMLResponse)
 def index():
     opts = "".join(
         f'<option value="{s["id"]}">{s["label"]}</option>' for s in SPEAKERS
     )
     return f"""<!doctype html><html><head><meta charset=utf-8>
-<title>MOSS-TTS-PNY</title>
+<title>PoneTTS Management</title>
 <style>body{{font-family:system-ui;max-width:640px;margin:40px auto;padding:0 16px}}
 textarea,select,button{{font-size:16px;width:100%;margin:6px 0;padding:8px}}</style></head>
 <style>.box{{border:1px solid #ccc;border-radius:8px;padding:8px 12px;margin:10px 0;background:#f7f7f7}}
-.box label{{font-weight:600}} #pstat{{font-size:14px;color:#555}}</style>
-<body><h2>MOSS-TTS-PNY &mdash; LAN test</h2>
+.box label{{font-weight:600}} #pstat{{font-size:14px;color:#555}}
+.row{{display:flex;gap:8px;align-items:center}} .row button,.row select{{width:auto;flex:1}}
+button.stop{{background:#fbe9e9;border:1px solid #d99}} button.small{{flex:0 0 auto;font-size:14px;padding:4px 10px}}
+#act,#hstat{{font-size:14px;color:#555}}
+.h{{border-top:1px solid #ddd;padding:8px 0}} .h .meta{{font-size:13px;color:#555}}
+.h .txt{{margin:4px 0;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
+.h .txt.open{{white-space:normal}} .h audio{{width:100%;height:36px}}
+.h .acts{{font-size:13px}} .h .acts a,.h .acts button{{margin-right:10px;font-size:13px;width:auto;padding:2px 8px}}</style>
+<body><h2>PoneTTS Management</h2>
 <div class=box>
 <label for=preset>Quality / VRAM</label>
 <select id=preset onchange=setPreset()></select>
@@ -2144,8 +2428,17 @@ textarea,select,button{{font-size:16px;width:100%;margin:6px 0;padding:8px}}</st
 <textarea id=t rows=3>Hello there! Welcome to Ponyville.</textarea>
 <select id=s>{opts}</select>
 <label>temperature <input id=temp type=number step=0.05 value={_default_audio_temperature}></label>
-<button id=speak onclick=go()>Speak</button>
+<div class=row><button id=speak onclick=go()>Speak</button>
+<button id=stopmine class=stop onclick="stopGen('mine')" hidden>Stop mine</button>
+<button id=stopall class=stop onclick="stopGen('all')" title="Cancel every client's generations (VN, SillyTavern, this page)">Stop all</button></div>
 <p id=st></p><audio id=a controls></audio>
+<p id=act></p>
+<div class=box id=histbox><div class=row><strong style="flex:1">History</strong>
+<select id=hvoice onchange=loadHistory()><option value="">all voices</option></select>
+<select id=hclient onchange=loadHistory()><option value="">all clients</option></select>
+<button class=small onclick=loadHistory()>Refresh</button>
+<button class="small stop" onclick=clearHistory()>Clear all</button></div>
+<p id=hstat></p><div id=hist></div></div>
 <script>
 const presetSel=document.getElementById('preset'),pstat=document.getElementById('pstat'),
       speakBtn=document.getElementById('speak');
@@ -2173,20 +2466,28 @@ async function poll(){{
  }}catch(e){{return setTimeout(poll,2000);}}
  presetSel.disabled=false;speakBtn.disabled=false;
 }}
+let genCtl=null;
 async function go(){{
  const st=document.getElementById('st');st.textContent='generating...';
  const body={{text:document.getElementById('t').value,
    speaker_id:+document.getElementById('s').value,
    audio_temperature:+document.getElementById('temp').value}};
- const r=await fetch('/tts',{{method:'POST',headers:{{'Content-Type':'application/json','X-Client-App':'webui'}},
-   body:JSON.stringify(body)}});
- if(!r.ok){{st.textContent='error '+r.status;return;}}
- const b=await r.blob();document.getElementById('a').src=URL.createObjectURL(b);
- st.textContent='ok ('+(r.headers.get('X-Duration-Sec')||'?')+'s)';
- document.getElementById('a').play();
+ genCtl=new AbortController();
+ speakBtn.disabled=true;document.getElementById('stopmine').hidden=false;
+ try{{
+  const r=await fetch('/tts',{{method:'POST',headers:{{'Content-Type':'application/json','X-Client-App':'webui'}},
+    body:JSON.stringify(body),signal:genCtl.signal}});
+  if(r.status===409){{st.textContent='stopped';return;}}
+  if(!r.ok){{st.textContent='error '+r.status;return;}}
+  const b=await r.blob();document.getElementById('a').src=URL.createObjectURL(b);
+  st.textContent='ok ('+(r.headers.get('X-Duration-Sec')||'?')+'s)';
+  document.getElementById('a').play();
+  loadHistory();
+ }}catch(e){{st.textContent=(e.name==='AbortError')?'stopped':'error: '+e;}}
+ finally{{genCtl=null;speakBtn.disabled=false;document.getElementById('stopmine').hidden=true;}}
 }}
 loadPresets();
-</script></body></html>"""
+</script>""" + _PAGE_EXTRA_JS
 
 
 # ----------------------------------------------------------------------------

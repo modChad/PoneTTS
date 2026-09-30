@@ -37,9 +37,6 @@ if [ ! -f "$BUNDLE/portable_tts_runtime.py" ]; then
   exit 1
 fi
 
-# 4b) fix a NameError in the downloaded runtime (see patch_torchopt_bundle.py)
-"$PY" patch_torchopt_bundle.py
-
 # 5) apply the v2.5 voice patch (pronunciation fine-tune, merged into the model once)
 echo "[setup] applying the v2.5 voice patch (a few minutes)..."
 "$PY" apply_voice_patch.py
@@ -58,7 +55,7 @@ fi
 echo
 echo "[setup] done."
 echo
-echo "Pick a performance preset to match your GPU's VRAM (default: balanced):"
+echo "Pick a performance preset to match your GPU's VRAM (default: quality):"
 echo "    ./tts.py preset quality    # ~16 GB cards  (fastest)"
 echo "    ./tts.py preset balanced   # ~10-12 GB"
 echo "    ./tts.py preset low_vram   # ~8 GB"
