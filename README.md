@@ -37,7 +37,7 @@ cd PoneTTS
 1. Checks for the Docker CLI, Engine, Compose and buildx, and offers to install anything missing (pacman, apt, dnf or zypper). It always asks before installing.
 2. Detects your GPU vendor and VRAM, and on NVIDIA checks for the NVIDIA Container Toolkit.
 3. Suggests a performance preset. You can accept it or pick your own.
-4. Asks for a port (default `8800`), whether other devices on your network may reach it (default: no, this machine only), and whether `/sfx` may fetch sound effects from the internet.
+4. Asks for a port (default `8800`) and whether `/sfx` may fetch sound effects from the internet.
 5. Writes `docker-compose.yml` for your hardware, including a RAM cap so running out of memory restarts the server instead of your desktop.
 6. Builds the image and starts it.
 
@@ -80,7 +80,7 @@ services:
               count: all
               capabilities: [gpu]
     ports:
-      - "127.0.0.1:8800:8800"   # this machine only; "8800:8800" for your LAN
+      - "8800:8800"
     volumes:
       - pone-ttsmod_release:/app/release         # the model (~12 GB)
       - pone-ttsmod_sfx_cache:/app/sfx_cache
@@ -109,7 +109,7 @@ docker build --target runtime-rocm -t pone-ttsmod:rocm .   # AMD (experimental)
 
 ## Performance presets
 
-Set with `MOSS_PERF_PRESET`, or switch live from the dropdown on the test page. The dropdown's choice is saved in the model volume and wins over `MOSS_PERF_PRESET` from then on; to go back to the env var, delete it with `docker compose exec pone-ttsmod rm /app/release/preset.conf` and restart.
+Set with `MOSS_PERF_PRESET`, or switch live from the dropdown on the test page (the choice persists across restarts).
 
 | Preset | VRAM | Notes |
 |---|---|---|
@@ -132,11 +132,11 @@ Environment variables for the container:
 | `PORT` | `8800` | Port the server listens on inside the container |
 | `MOSS_AUDIO_TEMPERATURE` | `0.85` | Default sampling temperature. Lower is steadier, higher is more expressive |
 | `MOSS_SFX_ALLOW_NETWORK` | `1` | `0` makes `/sfx` serve only from its cache, with no outgoing requests |
-| `MOSS_FIX_STUCK_WORDS` | `1` | Detect and regenerate words that get stuck droning |
+| `MOSS_FIX_STUCK_WORDS` | `1` | Detect and regenerate words that get stuck droning. Runs Whisper on every sentence; `0` is much faster |
+| `MOSS_LOOP_GUARD_REL_MULT` | `1.6` | A sentence this many times longer than expected is checked with Whisper for repeats, and trimmed to one reading |
 | `MOSS_FIX_PRON` | `0` | Check rare words with Whisper and fix their pronunciation (slower) |
 | `MOSS_AUTO_RESPELL` | `0` | Automatically respell rare words phonetically |
 | `MOSS_DECODER_RUNTIME` | from preset | Override the vocoder: `onnx_cuda`, `onnx_cpu` or `onnx_hybrid` |
-| `MOSS_CORS_ORIGINS` | *(local pages only)* | Extra browser origins allowed to call the server, comma-separated (e.g. `http://192.168.1.20:8000`), or `*` for any. See [Security](#security) |
 | `HSA_OVERRIDE_GFX_VERSION` | `11.0.2` (AMD image) | AMD only: GPU architecture override. See [known issues](#known-issues) |
 | `HF_HUB_ENABLE_HF_TRANSFER` / `HF_HUB_DISABLE_XET` | `0` / `1` | The fast model downloaders are off by default; they got the container killed on test hardware |
 
@@ -199,12 +199,6 @@ Send an `X-Client-App` header (e.g. `X-Client-App: ppp`) so your requests show u
 [req] 2026-09-28T22:03:58 client=ppp ip=172.18.0.1 POST /tts 200 1.84s
 ```
 
-## Security
-
-The server has no login, so by default it's only reachable from this machine and from other containers on its Docker network. To use it from other devices, answer **y** to the network question in `run.sh` (or publish `"8800:8800"` yourself). Never forward the port to the internet.
-
-Browsers can only change settings (`POST` requests) from pages on `localhost`, from the server's own test page, or from origins listed in `MOSS_CORS_ORIGINS`. This stops random websites you visit from poking the server. Non-browser clients (the game, curl, SillyTavern's server) aren't affected.
-
 ## SillyTavern
 
 Use either TTS provider:
@@ -212,7 +206,7 @@ Use either TTS provider:
 - **XTTSv2:** server URL `http://pone-ttsmod:8800`. SillyTavern fetches the voice list from `/speakers` automatically.
 - **OpenAI Compatible:** endpoint `http://pone-ttsmod:8800/v1/audio/speech`. This provider doesn't fetch voices, so type the speaker names you want (from `/speakers`) into its comma-separated voice list.
 
-Use the container name (`pone-ttsmod`) when SillyTavern runs in a container on the same Docker network. Otherwise use `localhost`, or the host's IP address if you enabled network access. If SillyTavern's page is opened from a different device and requests fail with 403, add that page's address to `MOSS_CORS_ORIGINS`.
+Use the container name (`pone-ttsmod`) when SillyTavern runs in a container on the same Docker network. Otherwise use the host's IP address.
 
 ## Pronunciation
 
@@ -269,7 +263,6 @@ Zecora = Zeh core ah
 - **AMD is highly experimental** (see the note at the top).
 - The AMD image sets `HSA_OVERRIDE_GFX_VERSION=11.0.2` (RX 7700S) for every AMD card. Other cards may need a different value or none at all.
 - The NVIDIA image hasn't yet been confirmed running on real hardware.
-- `server/sfx_cache/` ships sounds from Freesound and the BBC archive. Check their licences allow redistribution before publishing (see [License](#license)).
 
 ## Credits
 
