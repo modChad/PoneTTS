@@ -977,6 +977,56 @@ _MAX_TOTAL_CLAUSES = 200
 # decimal point).
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?:;])\s+")
 
+# Long sentences with no . ! ? : ; inside them are also split at commas, since
+# one long generation is where the model most often loses its place (repeats
+# its ending, or trails off into silence). Comma-separated parts are PACKED
+# into pieces rather than split at every comma, so lists and Oxford commas
+# ("apples, pears, and bananas") stay together and no piece is a fragment.
+COMMA_SPLIT_MIN_WORDS = int(os.environ.get("MOSS_COMMA_SPLIT_MIN_WORDS", "20"))
+COMMA_PIECE_MAX_WORDS = 15   # grow a piece until the next part would pass this
+COMMA_PIECE_MIN_WORDS = 5    # never leave a piece shorter than this
+COMMA_LIST_ITEM_MAX_WORDS = 2  # a comma part this short is a list item: never split beside it
+# Gap after a comma piece - short, since it's a mid-sentence breath, not a stop.
+COMMA_PAUSE_SEC = 0.12
+_COMMA_SPLIT_RE = re.compile(r"(?<=,)\s+")
+
+
+def _pack_commas(sentence: str) -> list[str]:
+    """Split one long sentence into comma-bounded pieces of a sensible size.
+    Short sentences (and anything without commas) come back unchanged."""
+    def nwords(t: str) -> int:
+        return len(t.split())
+    if COMMA_SPLIT_MIN_WORDS <= 0 or nwords(sentence) <= COMMA_SPLIT_MIN_WORDS:
+        return [sentence]
+    parts = [p for p in _COMMA_SPLIT_RE.split(sentence) if p.strip()]
+    if len(parts) < 2:
+        return [sentence]
+    # A comma is only a usable split point if the parts on BOTH sides are
+    # clause-sized. Next to a short part we're inside a list ("apples, pears,
+    # oranges, and bananas...") - splitting there would break the list,
+    # including just before an Oxford-comma "and"/"or".
+    def splittable(i: int) -> bool:   # boundary between parts[i] and parts[i+1]
+        return (nwords(parts[i]) >= COMMA_LIST_ITEM_MAX_WORDS + 1
+                and nwords(parts[i + 1]) >= COMMA_LIST_ITEM_MAX_WORDS + 1)
+    pieces: list[str] = []
+    cur = ""
+    for i, part in enumerate(parts):
+        if not cur:
+            cur = part
+        elif (nwords(cur) + nwords(part) > COMMA_PIECE_MAX_WORDS
+              and nwords(cur) >= COMMA_PIECE_MIN_WORDS
+              and splittable(i - 1)):
+            pieces.append(cur)
+            cur = part
+        else:
+            cur = f"{cur} {part}"
+    if cur:
+        if pieces and nwords(cur) < COMMA_PIECE_MIN_WORDS:
+            pieces[-1] = f"{pieces[-1]} {cur}"   # short leftover joins its neighbour
+        else:
+            pieces.append(cur)
+    return pieces
+
 
 def _split_clauses(text: str) -> list[tuple[str, float]]:
     """Split text into (segment, gap_after_sec) pairs for independent
@@ -998,17 +1048,24 @@ def _split_clauses(text: str) -> list[tuple[str, float]]:
         sentences = [s.strip() for s in _SENTENCE_SPLIT_RE.split(part) if s.strip()]
         for j, s in enumerate(sentences):
             is_last_sentence = j == len(sentences) - 1
-            raw.append((s, is_last_dash_part and is_last_sentence, is_last_sentence))
+            pieces = _pack_commas(s)
+            for k, piece in enumerate(pieces):
+                if k < len(pieces) - 1:
+                    # mid-sentence comma piece: short gap, never a sentence end
+                    raw.append((piece, False, False, True))
+                else:
+                    raw.append((piece, is_last_dash_part and is_last_sentence,
+                                is_last_sentence, False))
 
     if len(raw) > _MAX_TOTAL_CLAUSES:
         head = raw[:_MAX_TOTAL_CLAUSES - 1]
         tail_texts = [c[0] for c in raw[_MAX_TOTAL_CLAUSES - 1:]]
-        head.append((" ".join(tail_texts), raw[-1][1], True))
+        head.append((" ".join(tail_texts), raw[-1][1], True, False))
         raw = head
 
     out: list[tuple[str, float]] = []
     n = len(raw)
-    for idx, (s, is_true_last, ends_sentence_group) in enumerate(raw):
+    for idx, (s, is_true_last, ends_sentence_group, comma_piece) in enumerate(raw):
         is_final = idx == n - 1
         if s[-1] in ":;":
             # Don't leave a raw colon/semicolon as the literal last character
@@ -1021,6 +1078,8 @@ def _split_clauses(text: str) -> list[tuple[str, float]]:
             s += "," if not is_final else "."
         if is_final:
             gap = 0.0
+        elif comma_piece:
+            gap = COMMA_PAUSE_SEC     # mid-sentence comma break
         elif ends_sentence_group and not is_true_last:
             gap = PAUSE_SEC          # ends an em-dash-separated part
         else:
@@ -1082,38 +1141,91 @@ def _loop_guard_suspect(text: str, dur_sec: float, capped: bool) -> bool:
     return capped or dur_sec > _expected_clause_dur(text) * LOOP_GUARD_REL_MULT
 
 
+# A suspect clause where Whisper hears fewer than this share of the text's
+# words is treated as a failed generation (silence, hiss or gibberish instead
+# of the line) and regenerated, rather than passed on.
+LOOP_GUARD_MIN_HEARD = float(os.environ.get("MOSS_LOOP_GUARD_MIN_HEARD", "0.5"))
+# How many times a failed clause is regenerated before giving up.
+FAILED_CLAUSE_RETRIES = int(os.environ.get("MOSS_FAILED_CLAUSE_RETRIES", "2"))
+
+
+def _norm_word(w: str) -> str:
+    return re.sub(r"[^a-z']", "", w.lower())
+
+
+def _first_read_end(heard: list[str], target: list[str]) -> Optional[int]:
+    """Index in `heard` of the last word of the FIRST complete reading of
+    `target`, found by matching the text's final few words. Only accepted if
+    that match sits roughly where one reading should end (not suspiciously
+    early, e.g. a phrase that also appears mid-sentence) and more speech
+    follows it (otherwise there's nothing to cut). None if no clean match."""
+    n = len(target)
+    for k in (3, 2):
+        if n < k + 1:
+            continue
+        tail = target[-k:]
+        for i in range(len(heard) - k + 1):
+            if heard[i:i + k] == tail:
+                end = i + k - 1
+                if end + 1 >= int(n * 0.6) and end < len(heard) - 1:
+                    return end
+                break  # first occurrence decides; don't hunt for later ones
+    return None
+
+
 def _loop_guard_trim(audio, text: str, sr: int, capped: bool):
-    """Loop guard, part 2: the model sometimes misses end-of-speech and repeats
-    the line ("You feel so good. You feel so good. ..."). A runaway loop runs
-    into the token budget (`capped`); a clean double read stops on its own but
-    runs well past the text's expected length. Only in either case is the
-    (CPU-expensive) whisper pass worth it:
-    transcribe with word timestamps and cut right after the expected number of
-    words, so one clean read-through survives. Honest lines — even slow, breathy,
-    over-driven ones — stop on their own and never pay this cost."""
+    """Loop guard, part 2. Returns (audio, failed).
+
+    The model sometimes misses end-of-speech and repeats the line, in full
+    ("You feel so good. You feel so good.") or just its tail ("...until the
+    work is complete? ...is complete?"); or it produces silence/hiss instead
+    of the words. A runaway runs into the token budget (`capped`); a clean
+    repeat stops on its own but runs past the text's expected length. Only
+    then is the (CPU-expensive) whisper pass worth it. Honest lines - even
+    slow, breathy, over-driven ones - stop on their own and never pay it.
+
+    With the transcript:
+      - far fewer words than the text  -> failed=True (caller regenerates)
+      - the text's ending heard, then more speech -> cut after the first
+        reading's ending (catches whole and partial repeats)
+      - no clean ending match, but the text heard well over once -> cut
+        after the expected word count (the original fallback)
+    """
     dur = float(audio.numel()) / sr
     if not _loop_guard_suspect(text, dur, capped):
-        return audio
+        return audio, False
     try:
-        target_n = len(re.findall(r"[a-z']+", text.lower()))
+        target = [_norm_word(w) for w in re.findall(r"[A-Za-z']+", text)]
+        target = [w for w in target if w]
+        target_n = len(target)
         if target_n == 0:
-            return audio
+            return audio, False
         wav = audio_to_wav_bytes(audio, sr)
         segs, _ = _get_whisper().transcribe(io.BytesIO(wav), beam_size=5,
                                             word_timestamps=True)
         words = [w for s in segs for w in (s.words or [])]
-        # long-but-honest (slow delivery, big pauses) is fine; only cut when we
-        # actually heard the text substantially more than once
-        if len(words) <= int(target_n * 1.5) + 2:
-            return audio
-        cut = min(dur, float(words[target_n - 1].end) + 0.35)
+        heard = [_norm_word(w.word) for w in words]
+
+        if len(words) < max(1, int(target_n * LOOP_GUARD_MIN_HEARD)):
+            print(f"[loop-guard] heard {len(words)} of {target_n} words in "
+                  f"{dur:.1f}s; generation failed", flush=True)
+            return audio, True
+
+        end = _first_read_end(heard, target)
+        if end is not None:
+            how = "repeated ending"
+        elif len(words) > int(target_n * 1.5) + 2:
+            end, how = target_n - 1, "heard well over once"
+        else:
+            return audio, False
+        cut = min(dur, float(words[end].end) + 0.35)
         n_samp = min(audio.numel(), int(cut * sr))
-        print(f"[loop-guard] heard {len(words)} words for a {target_n}-word line; "
-              f"trimmed {dur:.1f}s -> {cut:.1f}s", flush=True)
-        return audio[..., :n_samp] if audio.dim() > 1 else audio[:n_samp]
-    except Exception as exc:  # noqa: BLE001 — guard must never break synthesis
+        print(f"[loop-guard] {how}: heard {len(words)} words for a {target_n}-word "
+              f"line; trimmed {dur:.1f}s -> {cut:.1f}s", flush=True)
+        return (audio[..., :n_samp] if audio.dim() > 1 else audio[:n_samp]), False
+    except Exception as exc:  # noqa: BLE001 - guard must never break synthesis
         print(f"[loop-guard] skipped ({exc})", flush=True)
-        return audio
+        return audio, False
 
 
 def _synth_once(text: str, req: TTSRequest, mnt: int, temp: float,
@@ -1143,8 +1255,8 @@ def _synth_once(text: str, req: TTSRequest, mnt: int, temp: float,
             )
             audio = result["audio"]
             _gen_tok = int(result.get("generated_tokens", 0) or 0)
-            audio = _loop_guard_trim(audio, text, _runner.sample_rate,
-                                     _gen_tok >= mnt - 2)
+            audio, gen_failed = _loop_guard_trim(audio, text, _runner.sample_rate,
+                                                 _gen_tok >= mnt - 2)
             if req.trim_silence:
                 audio = shorten_silences(
                     audio, _runner.sample_rate, max_gap_ms=req.silence_max_gap_ms
@@ -1170,7 +1282,7 @@ def _synth_once(text: str, req: TTSRequest, mnt: int, temp: float,
                 ) from exc
             raise HTTPException(status_code=500, detail=f"synthesis failed: {msg}") from exc
     return {"wav": wav, "sample_rate": _runner.sample_rate, "duration_sec": duration,
-            "normalized_text": text, "timing": timing}
+            "normalized_text": text, "timing": timing, "failed": gen_failed}
 
 
 def _synth_verified(text: str, req: TTSRequest, mnt: int, temp: float,
@@ -1325,6 +1437,18 @@ def _synth_no_stuck_words(text: str, req: TTSRequest, mnt: int, temp: float,
     stuck after exhausting retries — never blocks the response
     indefinitely."""
     out = _synth_verified(text, req, mnt, temp, emo_id, energy, strength)
+    # Failed generation (loop guard heard silence/hiss/gibberish instead of the
+    # words): regenerate. Always on - independent of MOSS_FIX_STUCK_WORDS.
+    for attempt in range(1, FAILED_CLAUSE_RETRIES + 1):
+        if not out.get("failed"):
+            break
+        print(f"[loop-guard] regenerating failed clause "
+              f"({attempt}/{FAILED_CLAUSE_RETRIES}): {text[:60]!r}", flush=True)
+        out = _synth_verified(text, req, mnt, temp, emo_id, energy, strength)
+    else:
+        if out.get("failed"):
+            print(f"[loop-guard] clause still failed after {FAILED_CLAUSE_RETRIES} "
+                  f"retries; shipping as-is: {text[:60]!r}", flush=True)
     if not req.fix_stuck_words:
         return out
     for attempt in range(1, STUCK_WORD_RETRIES + 1):
