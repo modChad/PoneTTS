@@ -49,7 +49,7 @@ import numpy as np
 import torch
 from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -887,7 +887,7 @@ app.add_middleware(
 #      that hasn't been updated to send the header is still visible, just
 #      unattributed.
 # ----------------------------------------------------------------------------
-_ST_COMPAT_PATHS = {"/tts_to_audio/", "/tts_stream/", "/v1/audio/speech"}
+_ST_COMPAT_PATHS = {"/tts_to_audio/", "/tts_stream/", "/v1/audio/speech", "/set_tts_settings"}
 
 
 def _client_app(request: Request) -> str:
@@ -1043,7 +1043,9 @@ def _synthesize(req: TTSRequest, client: str = "unspecified") -> dict:
     return out
 
 
-def _synthesize_inner(req: TTSRequest) -> dict:
+def _prepare_synth(req: TTSRequest):
+    """Validate + normalize a request; returns (text, mnt, temp, emo_id, energy,
+    strength). Shared by the one-shot and streaming paths so they behave alike."""
     if req.speaker_id not in SPEAKER_IDS:
         raise HTTPException(
             status_code=400,
@@ -1068,6 +1070,11 @@ def _synthesize_inner(req: TTSRequest) -> dict:
             if req.normalize else raw)
     if not text.strip():
         raise HTTPException(status_code=400, detail="text is empty after normalization")
+    return text, mnt, temp, emo_id, energy, strength
+
+
+def _synthesize_inner(req: TTSRequest) -> dict:
+    text, mnt, temp, emo_id, energy, strength = _prepare_synth(req)
     return _synth_pauses(text, req, mnt, temp, emo_id, energy, strength)
 
 
@@ -1217,6 +1224,69 @@ def _split_clauses(text: str) -> list[tuple[str, float]]:
             gap = SENTENCE_PAUSE_SEC  # ordinary sentence boundary
         out.append((s, gap))
     return out
+
+
+def _synthesize_stream(req: TTSRequest, client: str = "unspecified"):
+    """Streaming variant of _synthesize for /tts_stream/: returns a generator of
+    WAV bytes (header with unknown length, then each sentence's PCM + its gap as
+    soon as it is generated). Validation runs here, eagerly, so a bad request
+    still gets a proper HTTP error. The finished line is saved to history, and
+    the request shows up in (and can be cancelled from) the activity list like
+    any other. The ticket is re-bound on every chunk because the framework may
+    run successive chunks on different worker threads."""
+    text, mnt, temp, emo_id, energy, strength = _prepare_synth(req)
+    clauses = _split_clauses(text)
+
+    def gen():
+        ticket = _ticket_open(client, req.text)
+        pieces = []
+        sr = 0
+        done = False
+        try:
+            for p, gap_sec in clauses:
+                _tl.ticket = ticket
+                try:
+                    seg_mnt = min(mnt, max(96, len(p) * 3 + 64))
+                    o = _synth_no_stuck_words(p, req, seg_mnt, temp, emo_id, energy, strength)
+                except HTTPException as exc:   # cancelled / failed mid-stream: end the stream
+                    print(f"[stream] stopped: {exc.detail}", flush=True)
+                    return
+                finally:
+                    _tl.ticket = None
+                sr = o["sample_rate"]
+                with wave.open(io.BytesIO(o["wav"]), "rb") as h:
+                    pcm = h.readframes(h.getnframes())
+                if not pieces:
+                    # sizes unknown up front, so 0xFFFFFFFF in both length fields
+                    yield (b"RIFF" + (0xFFFFFFFF).to_bytes(4, "little") + b"WAVEfmt "
+                           + (16).to_bytes(4, "little") + (1).to_bytes(2, "little")
+                           + (1).to_bytes(2, "little") + sr.to_bytes(4, "little")
+                           + (sr * 2).to_bytes(4, "little") + (2).to_bytes(2, "little")
+                           + (16).to_bytes(2, "little") + b"data"
+                           + (0xFFFFFFFF).to_bytes(4, "little"))
+                pieces.append(pcm)
+                yield pcm
+                if gap_sec > 0:
+                    silence = bytes(int(sr * gap_sec) * 2)
+                    pieces.append(silence)
+                    yield silence
+            done = True
+        finally:
+            _ticket_close(ticket)
+            if done and pieces:
+                try:
+                    raw = b"".join(pieces)
+                    buf = io.BytesIO()
+                    with wave.open(buf, "wb") as h:
+                        h.setnchannels(1)
+                        h.setsampwidth(2)
+                        h.setframerate(sr)
+                        h.writeframes(raw)
+                    _history_add({"wav": buf.getvalue(), "duration_sec": len(raw) / 2 / sr},
+                                 req, client)
+                except Exception as exc:  # noqa: BLE001 - history must never break a request
+                    print(f"[history] not saved ({exc})", flush=True)
+    return gen()
 
 
 def _synth_pauses(text: str, req: TTSRequest, mnt: int, temp: float,
@@ -2129,15 +2199,17 @@ def xtts_compat_stream(
     speaker_wav: str = Query(...),
     language: str = "en",
 ):
-    """Same as /tts_to_audio/ but as a GET, for ST's streaming-mode URL."""
+    """GET for ST's streaming-mode URL. Streams the WAV one sentence at a time so
+    playback can start after the first sentence rather than the whole paragraph.
+    (/tts_to_audio/ stays one-shot.)"""
     tts_req = TTSRequest(
         text=text,
         speaker_id=_speaker_id_from_name(speaker_wav),
         language=language,
         format="wav",
     )
-    out = _synthesize(tts_req, _client_app(request))
-    return Response(content=out["wav"], media_type="audio/wav")
+    return StreamingResponse(_synthesize_stream(tts_req, _client_app(request)),
+                             media_type="audio/wav")
 
 
 @app.post("/set_tts_settings")
