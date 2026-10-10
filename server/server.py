@@ -1039,6 +1039,7 @@ def _synthesize(req: TTSRequest, client: str = "unspecified") -> dict:
     finally:
         _tl.ticket = None
         _ticket_close(ticket)
+    out = _fx_apply_to_out(out, req.speaker_id)     # the voice's own effect, if one is set
     _history_add(out, req, client)
     return out
 
@@ -1242,6 +1243,7 @@ def _synthesize_stream(req: TTSRequest, client: str = "unspecified"):
         pieces = []
         sr = 0
         done = False
+        fx = None
         try:
             for p, gap_sec in clauses:
                 _tl.ticket = ticket
@@ -1264,12 +1266,28 @@ def _synthesize_stream(req: TTSRequest, client: str = "unspecified"):
                            + (sr * 2).to_bytes(4, "little") + (2).to_bytes(2, "little")
                            + (16).to_bytes(2, "little") + b"data"
                            + (0xFFFFFFFF).to_bytes(4, "little"))
-                pieces.append(pcm)
-                yield pcm
-                if gap_sec > 0:
-                    silence = bytes(int(sr * gap_sec) * 2)
-                    pieces.append(silence)
-                    yield silence
+                if fx is None and len(pieces) == 0:
+                    fx = _fx_for(req.speaker_id, sr)      # the voice's own effect, if one is set
+                gap_n = int(sr * gap_sec) if gap_sec > 0 else 0
+                if fx is not None:
+                    # effect runs over the sentence plus its trailing gap, so reverb can ring into it
+                    x = np.concatenate([_pcm16_to_f32(pcm), np.zeros(gap_n, dtype=np.float32)])
+                    chunk = _f32_to_pcm16(fx.process(x))
+                    pieces.append(chunk)
+                    yield chunk
+                else:
+                    pieces.append(pcm)
+                    yield pcm
+                    if gap_n:
+                        silence = bytes(gap_n * 2)
+                        pieces.append(silence)
+                        yield silence
+            if fx is not None:
+                tail = fx.flush()                            # whatever is still ringing (reverb)
+                if len(tail):
+                    chunk = _f32_to_pcm16(tail)
+                    pieces.append(chunk)
+                    yield chunk
             done = True
         finally:
             _ticket_close(ticket)
@@ -2404,6 +2422,40 @@ def st_cache_generate(req: STCacheGenerateRequest, request: Request):
 # Plain string (not an f-string) so the JavaScript can use normal braces.
 # Every history value is inserted with textContent / attributes, never as HTML:
 # the texts come from any client.
+_FX_PAGE_JS = """<script>
+let fxData=null;
+function fxShowStr(){ document.getElementById('fxstrv').textContent=(+document.getElementById('fxstr').value).toFixed(2); }
+async function fxInit(){
+  try{
+    fxData=await (await fetch('/voice_fx')).json();
+    const sel=document.getElementById('fxsel');
+    sel.innerHTML='<option value="off">No effect</option>'+fxData.effects.map(e=>`<option value="${e.id}">${e.label}</option>`).join('');
+    fxLoadForVoice();
+  }catch(e){ document.getElementById('fxstat').textContent='effects unavailable: '+e; }
+}
+function fxLoadForVoice(){
+  if(!fxData) return;
+  const id=document.getElementById('s').value, cur=fxData.per_speaker[id];
+  document.getElementById('fxsel').value=cur?cur.fx:'off';
+  document.getElementById('fxstr').value=cur?cur.strength:0.7;
+  fxShowStr();
+  const n=Object.keys(fxData.per_speaker).length;
+  document.getElementById('fxstat').textContent=cur?'saved: '+cur.fx+' at '+cur.strength.toFixed(2)
+    :'no effect saved for this voice ('+n+' voice'+(n==1?'':'s')+' have one)';
+}
+async function fxSave(preview){
+  const body={speaker_id:+document.getElementById('s').value,fx:document.getElementById('fxsel').value,
+              strength:+document.getElementById('fxstr').value};
+  const r=await fetch('/voice_fx',{method:'POST',headers:{'Content-Type':'application/json','X-Client-App':'webui'},body:JSON.stringify(body)});
+  if(!r.ok){ document.getElementById('fxstat').textContent='error: '+(await r.json()).detail; return; }
+  fxData=await r.json(); fxLoadForVoice();
+  document.getElementById('fxstat').textContent='saved - applies to this voice for every caller';
+  if(preview) go();
+}
+fxInit();
+</script>"""
+
+
 _PAGE_EXTRA_JS = """<script>
 const $ = id => document.getElementById(id);
 async function stopGen(scope){
@@ -2498,7 +2550,14 @@ button.stop{{background:#fbe9e9;border:1px solid #d99}} button.small{{flex:0 0 a
 <p id=pstat>&nbsp;</p>
 </div>
 <textarea id=t rows=3>Hello there! Welcome to Ponyville.</textarea>
-<select id=s>{opts}</select>
+<select id=s onchange=fxLoadForVoice()>{opts}</select>
+<div class=box id=fxbox><div class=row><strong style="flex:1">Voice effect</strong>
+<select id=fxsel></select>
+<input id=fxstr type=range min=0 max=1 step=0.05 value=0.7 style="flex:1" oninput="fxShowStr()">
+<span id=fxstrv style="width:2.5em;text-align:right">0.70</span></div>
+<div class=row><button class=small onclick="fxSave(false)" title="Save this effect for the voice selected above. It then applies for every caller: SillyTavern, the VN and this page.">Save for this voice</button>
+<button class=small onclick="fxSave(true)">Save &amp; preview</button></div>
+<p id=fxstat></p></div>
 <label>temperature <input id=temp type=number step=0.05 value={_default_audio_temperature}></label>
 <div class=row><button id=speak onclick=go()>Speak</button>
 <button id=stopmine class=stop onclick="stopGen('mine')" hidden>Stop mine</button>
@@ -2559,7 +2618,7 @@ async function go(){{
  finally{{genCtl=null;speakBtn.disabled=false;document.getElementById('stopmine').hidden=true;}}
 }}
 loadPresets();
-</script>""" + _PAGE_EXTRA_JS
+</script>""" + _PAGE_EXTRA_JS + _FX_PAGE_JS
 
 
 # ----------------------------------------------------------------------------
@@ -2916,6 +2975,263 @@ def voice_blend_set(req: BlendRequest):
     return voice_blend_get()
 
 
+# ----------------------------------------------------------------------------
+# Voice effects (post-processing). Applied to the finished audio of a voice, so
+# the effect belongs to the VOICE and is identical for every caller (SillyTavern,
+# the VN, this web page). The web page is the control centre: POST /voice_fx
+# saves {speaker_id -> effect + strength} to voice_fx.json. Pure numpy, no new
+# dependencies. Streaming-safe: each effect is a small stateful object that
+# processes one chunk at a time and carries what it needs (oscillator phase,
+# reverb tail) across chunk boundaries so sentence joins don't click.
+# ----------------------------------------------------------------------------
+VOICE_FX_FILE = PROJECT_DIR / "voice_fx.json"
+FX_NAMES = {
+    "robot": "Robot",
+    "radio": "Radio",
+    "cavern": "Cavern",
+    "helium": "Helium",
+    "changeling": "Changeling",
+}
+_fx_per_speaker: dict[int, dict] = {}   # speaker_id -> {"fx": name, "strength": 0..1}
+_fx_lock = threading.Lock()
+
+
+def _fx_load_config() -> None:
+    global _fx_per_speaker
+    try:
+        cfg = json.loads(VOICE_FX_FILE.read_text())
+    except (OSError, ValueError):
+        return
+    out = {}
+    try:
+        for k, v in (cfg.get("per_speaker") or {}).items():
+            name = str(v.get("fx", ""))
+            if name in FX_NAMES:
+                out[int(k)] = {"fx": name, "strength": max(0.0, min(1.0, float(v.get("strength", 0.7))))}
+    except (TypeError, ValueError, AttributeError):
+        return
+    _fx_per_speaker = out
+
+
+def _fx_save() -> None:
+    try:
+        VOICE_FX_FILE.write_text(json.dumps(
+            {"per_speaker": {str(k): v for k, v in sorted(_fx_per_speaker.items())}},
+            indent=1), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _stft(x: np.ndarray, n: int = 1024, hop: int = 256) -> np.ndarray:
+    pad = np.zeros(n, dtype=np.float32)
+    x = np.concatenate([pad, x, pad])
+    win = np.hanning(n + 1)[:-1].astype(np.float32)
+    n_frames = 1 + (len(x) - n) // hop
+    idx = np.arange(n)[None, :] + hop * np.arange(n_frames)[:, None]
+    return np.fft.rfft(x[idx] * win, axis=1)
+
+
+def _istft(S: np.ndarray, start: int, length: int, n: int = 1024, hop: int = 256) -> np.ndarray:
+    win = np.hanning(n + 1)[:-1].astype(np.float32)
+    frames = np.fft.irfft(S, n=n, axis=1).astype(np.float32) * win
+    total = hop * (len(frames) - 1) + n
+    y = np.zeros(total, dtype=np.float32)
+    wsum = np.zeros(total, dtype=np.float32)
+    for i, f in enumerate(frames):
+        y[i * hop:i * hop + n] += f
+        wsum[i * hop:i * hop + n] += win * win
+    y /= np.maximum(wsum, 1e-3)
+    y = y[start:start + length]
+    if len(y) < length:
+        y = np.pad(y, (0, length - len(y)))
+    return y
+
+
+def _pitch_shift(x: np.ndarray, semitones: float) -> np.ndarray:
+    """Pitch shift keeping the duration (phase-vocoder time-stretch, then
+    resample back to the original length). Same length in as out, so shifted
+    layers stay aligned with the original."""
+    if len(x) < 2048 or abs(semitones) < 1e-3:
+        return x
+    n, hop = 1024, 256
+    ratio = 2.0 ** (semitones / 12.0)          # >1 = higher
+    S = _stft(x, n, hop)
+    rate = 1.0 / ratio                          # stretch by `ratio`, then play back faster/slower
+    steps = np.arange(0, S.shape[0] - 1, rate)
+    omega = 2 * np.pi * hop * np.arange(S.shape[1]) / n
+    phase = np.angle(S[0])
+    out = np.empty((len(steps), S.shape[1]), dtype=np.complex64)
+    for i, t in enumerate(steps):
+        k = int(t)
+        frac = t - k
+        a, b = S[k], S[k + 1]
+        mag = (1 - frac) * np.abs(a) + frac * np.abs(b)
+        out[i] = mag * np.exp(1j * phase)
+        dphi = np.angle(b) - np.angle(a) - omega
+        dphi -= 2 * np.pi * np.round(dphi / (2 * np.pi))
+        phase = phase + omega + dphi
+    # drop the input's leading pad (it was stretched too), keep exactly len*ratio samples
+    start = int(round(n * ratio))
+    stretched = _istft(out, start, int(round(len(x) * ratio)), n, hop)
+    # resample the stretched signal back to the original length
+    src = np.linspace(0, len(stretched) - 1, num=len(x))
+    y = np.interp(src, np.arange(len(stretched)), stretched).astype(np.float32)
+    # the vocoder sheds some energy on big upward shifts; match the input's level
+    r_in = float(np.sqrt(np.mean(x * x)))
+    r_out = float(np.sqrt(np.mean(y * y)))
+    if r_out > 1e-6:
+        y *= min(4.0, max(0.5, r_in / r_out))
+    return y
+
+
+def _fft_filter(x: np.ndarray, sr: int, lo: float, hi: float) -> np.ndarray:
+    n = 1 << int(np.ceil(np.log2(max(len(x), 2))))
+    X = np.fft.rfft(x, n)
+    f = np.fft.rfftfreq(n, 1.0 / sr)
+    mask = ((f >= lo) & (f <= hi)).astype(np.float32)
+    # soften the band edges a little so it doesn't ring
+    k = max(1, int(150 / (sr / n)))
+    mask = np.convolve(mask, np.hanning(2 * k + 1) / np.hanning(2 * k + 1).sum(), mode="same")
+    return np.fft.irfft(X * mask, n)[:len(x)].astype(np.float32)
+
+
+class _Fx:
+    """One effect instance for one request. process() returns exactly as many
+    samples as it was given; anything that rings on past the end (reverb) is
+    held back and added to the start of the next chunk, or returned by flush()."""
+
+    def __init__(self, name: str, strength: float, sr: int):
+        self.name, self.s, self.sr = name, float(strength), sr
+        self.pos = 0                                   # samples seen (oscillator phase)
+        self.carry = np.zeros(0, dtype=np.float32)
+        self.hist = np.zeros(int(sr * 0.003), dtype=np.float32)
+        if name == "cavern":
+            rng = np.random.default_rng(7)
+            L = int(sr * 1.8)
+            t = np.arange(L) / sr
+            self.ir = (rng.standard_normal(L) * np.exp(-t * 3.2)).astype(np.float32)
+            self.ir[0] = 0.0
+            self.ir /= np.sqrt(np.sum(self.ir ** 2)) + 1e-9
+
+    def process(self, x: np.ndarray) -> np.ndarray:
+        n = len(x)
+        if n == 0:
+            return x
+        s, sr = self.s, self.sr
+        if self.name == "robot":
+            t = (self.pos + np.arange(n)) / sr
+            ring = x * np.sin(2 * np.pi * 75.0 * t).astype(np.float32)
+            d = int(sr * 0.003)                         # 3 ms comb = metallic resonance
+            ext = np.concatenate([self.hist, ring])     # hist = last d samples of the previous chunk
+            comb = (ring + 0.55 * ext[:n]) * 0.75
+            self.hist = ext[-d:]
+            y = (1 - s) * x + s * comb
+        elif self.name == "radio":
+            band = _fft_filter(x, sr, 450.0, 3300.0)
+            driven = np.tanh(band * (1.0 + 4.0 * s)) / np.tanh(1.0 + 4.0 * s)
+            y = (1 - s) * x + s * driven
+        elif self.name == "helium":
+            y = (1 - s) * x + s * _pitch_shift(x, 3.0 + 4.0 * s)   # +3 .. +7 semitones
+        elif self.name == "changeling":
+            low2 = _pitch_shift(x, -2.0)
+            low4 = _pitch_shift(x, -4.0)
+            y = x + s * (0.8 * low2 + 0.65 * low4)
+            y /= (1.0 + s * 1.45) ** 0.6                # keep the stack from getting louder than one voice
+        elif self.name == "cavern":
+            m = len(self.ir)
+            size = 1 << int(np.ceil(np.log2(n + m)))
+            wet = np.fft.irfft(np.fft.rfft(x, size) * np.fft.rfft(self.ir, size), size)[:n + m - 1].astype(np.float32)
+            wet *= 0.9 * s
+            dry = x * (1.0 - 0.35 * s)
+            full = np.concatenate([dry, np.zeros(m - 1, dtype=np.float32)]) + wet
+            if len(self.carry):
+                full[:len(self.carry)] += self.carry
+            self.carry = full[n:].copy()
+            y = full[:n]
+        else:
+            y = x
+        self.pos += n
+        return np.clip(y, -1.0, 1.0).astype(np.float32)
+
+    def flush(self) -> np.ndarray:
+        """Whatever is still ringing after the last chunk (cavern reverb tail)."""
+        out, self.carry = self.carry, np.zeros(0, dtype=np.float32)
+        if len(out) and self.name == "cavern":
+            return np.clip(out, -1.0, 1.0).astype(np.float32)
+        return np.zeros(0, dtype=np.float32)
+
+
+def _fx_for(speaker_id: int, sr: int) -> Optional[_Fx]:
+    cfg = _fx_per_speaker.get(speaker_id)
+    if not cfg:
+        return None
+    return _Fx(cfg["fx"], cfg["strength"], sr)
+
+
+def _pcm16_to_f32(b: bytes) -> np.ndarray:
+    return np.frombuffer(b, dtype=np.int16).astype(np.float32) / 32768.0
+
+
+def _f32_to_pcm16(x: np.ndarray) -> bytes:
+    return (np.clip(x, -1.0, 1.0) * 32767.0).astype(np.int16).tobytes()
+
+
+def _fx_apply_to_out(out: dict, speaker_id: int) -> dict:
+    """One-shot path: run the voice's effect over a finished WAV result."""
+    try:
+        sr = int(out["sample_rate"])
+        fx = _fx_for(speaker_id, sr)
+        if fx is None:
+            return out
+        with wave.open(io.BytesIO(out["wav"]), "rb") as h:
+            raw = h.readframes(h.getnframes())
+        y = fx.process(_pcm16_to_f32(raw))
+        y = np.concatenate([y, fx.flush()])
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as h:
+            h.setnchannels(1)
+            h.setsampwidth(2)
+            h.setframerate(sr)
+            h.writeframes(_f32_to_pcm16(y))
+        out = dict(out)
+        out["wav"] = buf.getvalue()
+        out["duration_sec"] = float(len(y)) / sr
+    except Exception as exc:  # noqa: BLE001 - an effect must never break synthesis
+        print(f"[fx] skipped ({exc})", flush=True)
+    return out
+
+
+class FxRequest(BaseModel):
+    speaker_id: int
+    fx: str = "off"                      # off / robot / radio / cavern / helium / changeling
+    strength: float = Field(0.7, ge=0.0, le=1.0)
+
+
+@app.get("/voice_fx")
+def voice_fx_get():
+    return {
+        "effects": [{"id": k, "label": v} for k, v in FX_NAMES.items()],
+        "per_speaker": {str(k): v for k, v in sorted(_fx_per_speaker.items())},
+        "hint": "POST {\"speaker_id\": N, \"fx\": \"robot\", \"strength\": 0.7}; fx \"off\" clears it. "
+                "The effect belongs to the voice and applies for every caller.",
+    }
+
+
+@app.post("/voice_fx")
+def voice_fx_set(req: FxRequest):
+    if req.speaker_id not in SPEAKER_IDS:
+        raise HTTPException(status_code=400, detail=f"unknown speaker_id {req.speaker_id}")
+    if req.fx != "off" and req.fx not in FX_NAMES:
+        raise HTTPException(status_code=400, detail=f"unknown effect '{req.fx}'; one of: off, {', '.join(FX_NAMES)}")
+    with _fx_lock:
+        if req.fx == "off":
+            _fx_per_speaker.pop(req.speaker_id, None)
+        else:
+            _fx_per_speaker[req.speaker_id] = {"fx": req.fx, "strength": req.strength}
+        _fx_save()
+    return voice_fx_get()
+
+
 def _persisted_preset() -> Optional[str]:
     """Preset saved by the web-page dropdown, if any (survives restarts)."""
     try:
@@ -2981,6 +3297,7 @@ def main() -> None:
     # the process to set LD_LIBRARY_PATH; doing it first keeps that clean).
     build_runner(args.preset, args.max_new_tokens)
     _blend_load_config()                 # per-speaker blends re-sync lazily per request
+    _fx_load_config()                    # per-voice effects (voice_fx.json)
 
     import uvicorn
 
