@@ -5,21 +5,23 @@
 > and it needed manual workarounds to get there. Expect problems on other
 > AMD cards.
 
-## The easy way (Linux)
-Run `./run.sh`. It checks Docker/buildx are working, detects your GPU
+## The easy way (Linux, or Windows via WSL2)
+Run `./run.sh` (inside Ubuntu on WSL2 if you're on Windows). It checks Docker/buildx are working, detects your GPU
 vendor and VRAM, picks a matching performance preset, generates a
 `docker-compose.yml` for your hardware, and (with your confirmation) builds
 and starts it. Re-running it is safe — an existing `docker-compose.yml` gets
 backed up, not overwritten.
 
-Not Linux, or want to understand/customize what it's doing? Read on.
+On WSL2, `run.sh` also installs the NVIDIA Container Toolkit from NVIDIA's apt repo, starts Docker with `sudo service docker start` if systemd is off, and prints LAN-access steps. It needs `git-lfs` for the voice patch (it offers to install it). Keep the project on the WSL filesystem, not `/mnt/c`.
+
+Mac, or want to understand/customize what it's doing? Read on.
 
 ## 1. GPU driver, outside Docker, first
 Docker does not provide a GPU driver — it only passes through to whatever's
 already installed and working on the host. Confirm this in a plain terminal
 (no container) before touching this project at all:
 
-- **NVIDIA:** `nvidia-smi` should print your GPU and driver version.
+- **NVIDIA:** `nvidia-smi` should print your GPU and driver version. Under WSL2 the driver is installed on Windows; never install a Linux driver inside WSL.
 - **AMD:** `rocm-smi` should print your GPU.
 
 If neither works, install/fix the host driver first — nothing here can fix
