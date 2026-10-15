@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
-# PoneTTS setup — Linux only.
+# PoneTTS setup - Linux & Windows.
 #
-# Detects your GPU vendor (NVIDIA/AMD) and VRAM, generates a docker-compose.yml
+# Runs on native Linux, and on Windows via WSL2 (run it inside your WSL
+# distro, e.g. Ubuntu 22.04). Detects your GPU vendor (NVIDIA/AMD) and VRAM, generates a docker-compose.yml
 # tailored to your hardware (right build target, right device-passthrough
 # flags, right performance preset), and optionally builds + starts it.
 #
-# Does NOT install Docker, the NVIDIA Container Toolkit, or ROCm itself —
-# those are prerequisites. See DISTRIBUTING.md: confirm your GPU driver works
-# OUTSIDE Docker first (nvidia-smi / rocm-smi), or nothing here will help.
+# Offers to install missing Docker pieces and (NVIDIA) the NVIDIA Container
+# Toolkit. It does NOT install GPU drivers or ROCm: confirm your GPU driver
+# works OUTSIDE Docker first (nvidia-smi / rocm-smi). Under WSL2 the NVIDIA
+# driver lives on the Windows side - never install a Linux driver in WSL.
+# See DISTRIBUTING.md.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -29,12 +32,87 @@ warn()  { echo "${YELLOW}${BOLD}WARNING:${RESET} $*"; }
 error() { echo "${RED}${BOLD}ERROR:${RESET} $*" >&2; }
 
 # -----------------------------------------------------------------------------
+# Environment helpers: WSL detection, Docker service start
+# -----------------------------------------------------------------------------
+# WSL1 and WSL2 both put "microsoft" in the kernel release string.
+is_wsl() {
+    [[ -n "${WSL_DISTRO_NAME:-}" ]] \
+        || grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null
+}
+IS_WSL=0; WSL_VER=0
+if is_wsl; then
+    IS_WSL=1
+    # WSL2 exposes the GPU through /dev/dxg; WSL1 has no GPU support at all.
+    if grep -qi 'wsl2' /proc/sys/kernel/osrelease 2>/dev/null || [[ -e /dev/dxg ]]; then
+        WSL_VER=2
+    else
+        WSL_VER=1
+    fi
+fi
+# systemd is optional in WSL (needs "systemd=true" in /etc/wsl.conf).
+has_systemd() { [[ -d /run/systemd/system ]]; }
+
+# Start (and, where possible, enable) the Docker daemon.
+start_docker_service() {
+    if has_systemd; then
+        sudo systemctl enable --now docker && return 0
+    elif [[ "$IS_WSL" -eq 1 ]] && command -v service >/dev/null 2>&1; then
+        sudo service docker start && return 0
+    elif command -v systemctl >/dev/null 2>&1; then
+        sudo systemctl enable --now docker && return 0
+    fi
+    return 1
+}
+restart_docker_service() {
+    if has_systemd; then
+        sudo systemctl restart docker
+    elif [[ "$IS_WSL" -eq 1 ]] && command -v service >/dev/null 2>&1; then
+        sudo service docker restart
+    elif command -v systemctl >/dev/null 2>&1; then
+        sudo systemctl restart docker
+    else
+        return 1
+    fi
+}
+wsl_systemd_hint() {
+    warn "This WSL distro isn't running systemd, so Docker won't start on its own at boot."
+    warn "Either start it by hand each session ('sudo service docker start'), or enable systemd:"
+    warn "  add to /etc/wsl.conf:   [boot]  then  systemd=true"
+    warn "  then run 'wsl --shutdown' in Windows PowerShell and reopen the distro."
+}
+
+# -----------------------------------------------------------------------------
 # 1. OS check
 # -----------------------------------------------------------------------------
 if [[ "$(uname -s)" != "Linux" ]]; then
-    error "This setup script is Linux-only (detected: $(uname -s))."
-    error "Windows/Mac users: build/run the Dockerfile manually per DISTRIBUTING.md."
+    error "This setup script needs Linux (detected: $(uname -s))."
+    error "Windows users: install WSL2 with Ubuntu and run this script inside it (see README.md)."
+    error "Mac users: build/run the Dockerfile manually per DISTRIBUTING.md."
     exit 1
+fi
+
+if [[ "$IS_WSL" -eq 1 ]]; then
+    info "Windows Subsystem for Linux detected (WSL${WSL_VER}${WSL_DISTRO_NAME:+, ${WSL_DISTRO_NAME}})."
+    if [[ "$WSL_VER" -eq 1 ]]; then
+        error "WSL1 has no GPU support. Convert this distro to WSL2 (in PowerShell: wsl --set-version <distro> 2) and re-run."
+        exit 1
+    fi
+    # Line endings: a CRLF script breaks with errors like "$'\r': command not found".
+    if grep -q $'\r' "$SCRIPT_DIR/run.sh" 2>/dev/null; then
+        error "run.sh has Windows (CRLF) line endings. Fix with: sed -i 's/\r\$//' run.sh server/*.sh"
+        error "(or re-clone with 'git config --global core.autocrlf input'), then re-run."
+        exit 1
+    fi
+    # Project on the Windows drive: slow I/O and permission quirks.
+    case "$SCRIPT_DIR" in
+        /mnt/[a-zA-Z]/*)
+            warn "This project is on the Windows drive ($SCRIPT_DIR)."
+            warn "File access there is slow and Docker builds/volumes can misbehave. Keep it on the"
+            warn "WSL filesystem instead, e.g.:  cp -r \"$SCRIPT_DIR\" ~/PoneTTS && cd ~/PoneTTS"
+            read -rp "  Continue anyway? [y/N]: " go_mnt
+            [[ "$go_mnt" =~ ^[Yy] ]] || exit 1
+            ;;
+    esac
 fi
 
 # -----------------------------------------------------------------------------
@@ -154,9 +232,10 @@ if (( NEED_CLI + NEED_ENGINE + NEED_COMPOSE + NEED_BUILDX > 0 )); then
         exit 1
     fi
 
-    if [[ "$NEED_ENGINE" -eq 1 ]] && command -v systemctl >/dev/null 2>&1; then
-        info "Enabling and starting the Docker service..."
-        sudo systemctl enable --now docker || warn "Couldn't start docker.service — start it yourself."
+    if [[ "$NEED_ENGINE" -eq 1 ]]; then
+        info "Starting the Docker service..."
+        start_docker_service || warn "Couldn't start the Docker service — start it yourself."
+        if [[ "$IS_WSL" -eq 1 ]] && ! has_systemd; then wsl_systemd_hint; fi
     fi
 fi
 
@@ -186,7 +265,12 @@ read -r -a COMPOSE_CMD <<< "$COMPOSE"
 
 if ! docker info >/dev/null 2>&1; then
     error "Can't talk to the Docker daemon. Is it running? Are you in the 'docker' group?"
-    error "Try: sudo systemctl enable --now docker"
+    if [[ "$IS_WSL" -eq 1 ]] && ! has_systemd; then
+        error "Try: sudo service docker start"
+        wsl_systemd_hint
+    else
+        error "Try: sudo systemctl enable --now docker"
+    fi
     if ! id -nG 2>/dev/null | grep -qw docker; then
         error "You're not in the 'docker' group. Add yourself with:"
         error "  sudo usermod -aG docker \$USER"
@@ -201,6 +285,12 @@ echo "  Docker + Compose ($COMPOSE) + buildx OK."
 # 3. GPU vendor + VRAM detection
 # -----------------------------------------------------------------------------
 info "Detecting GPU..."
+
+# WSL2 ships nvidia-smi under /usr/lib/wsl/lib (injected by the Windows driver);
+# it is not always on PATH.
+if [[ "$IS_WSL" -eq 1 && -d /usr/lib/wsl/lib ]]; then
+    case ":$PATH:" in *:/usr/lib/wsl/lib:*) ;; *) export PATH="$PATH:/usr/lib/wsl/lib" ;; esac
+fi
 
 NVIDIA_OK=0
 NVIDIA_VRAM_MB=0
@@ -269,8 +359,17 @@ fi
 
 if [[ "$NVIDIA_OK" -eq 0 && "$AMD_OK" -eq 0 ]]; then
     error "No working GPU detected — neither nvidia-smi nor rocm-smi returned usable output."
-    error "Confirm your GPU driver works OUTSIDE Docker first: run 'nvidia-smi' or 'rocm-smi'"
-    error "directly in this terminal. If neither prints your GPU, fix that before re-running."
+    if [[ "$IS_WSL" -eq 1 ]]; then
+        error "Under WSL2 the GPU driver is installed on WINDOWS, not in this distro:"
+        error "  1. Install/update the NVIDIA driver on Windows (a WSL-capable one, 470+)."
+        error "  2. Do NOT install a Linux NVIDIA driver inside WSL - it breaks GPU passthrough."
+        error "  3. Run 'wsl --update' then 'wsl --shutdown' in PowerShell, reopen WSL, and check"
+        error "     that 'nvidia-smi' prints your GPU here."
+        error "(AMD GPUs aren't supported under WSL2 by this project.)"
+    else
+        error "Confirm your GPU driver works OUTSIDE Docker first: run 'nvidia-smi' or 'rocm-smi'"
+        error "directly in this terminal. If neither prints your GPU, fix that before re-running."
+    fi
     exit 1
 fi
 
@@ -314,7 +413,50 @@ if [[ "$VENDOR" == nvidia ]]; then
     else
         warn "NVIDIA Container Toolkit not found — Docker can't pass your GPU to the container without it."
         TK_CMD=()
-        if command -v pacman >/dev/null 2>&1; then
+        if [[ "$IS_WSL" -eq 1 ]] && command -v apt-get >/dev/null 2>&1; then
+            # WSL (Debian/Ubuntu): add NVIDIA's apt repo, then install a pinned version.
+            NVIDIA_CONTAINER_TOOLKIT_VERSION="${NVIDIA_CONTAINER_TOOLKIT_VERSION:-1.20.1-1}"
+            KEYRING=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+            LIST=/etc/apt/sources.list.d/nvidia-container-toolkit.list
+            echo "  This will:"
+            echo "    - install ca-certificates, curl, gnupg2"
+            echo "    - add NVIDIA's apt repo (key: $KEYRING, list: $LIST)"
+            echo "    - install nvidia-container-toolkit ${NVIDIA_CONTAINER_TOOLKIT_VERSION} (+ base, tools, libnvidia-container1)"
+            echo "    - register the NVIDIA runtime with Docker and restart Docker"
+            read -rp "  Install it now? [Y/n]: " do_tk
+            do_tk="${do_tk:-Y}"
+            if [[ ! "$do_tk" =~ ^[Yy] ]]; then
+                error "The NVIDIA Container Toolkit is required — install it, then re-run this script."
+                exit 1
+            fi
+            install_tk_wsl() {
+                sudo apt-get update && sudo apt-get install -y --no-install-recommends \
+                    ca-certificates curl gnupg2 || return 1
+                curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
+                    | sudo gpg --dearmor --yes -o "$KEYRING" || return 1
+                curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+                    | sed "s#deb https://#deb [signed-by=$KEYRING] https://#g" \
+                    | sudo tee "$LIST" >/dev/null || return 1
+                sudo apt-get update || return 1
+                local v="$NVIDIA_CONTAINER_TOOLKIT_VERSION"
+                sudo apt-get install -y \
+                    "nvidia-container-toolkit=${v}" \
+                    "nvidia-container-toolkit-base=${v}" \
+                    "libnvidia-container-tools=${v}" \
+                    "libnvidia-container1=${v}"
+            }
+            if ! install_tk_wsl; then
+                error "Toolkit install failed — see the output above."
+                exit 1
+            fi
+            if command -v nvidia-ctk >/dev/null 2>&1; then
+                sudo nvidia-ctk runtime configure --runtime=docker \
+                    || warn "Couldn't register the NVIDIA runtime with Docker (nvidia-ctk runtime configure)."
+            fi
+            restart_docker_service || warn "Couldn't restart Docker — restart it yourself ('sudo service docker restart')."
+            echo "  NVIDIA Container Toolkit installed."
+            TK_DONE=1
+        elif command -v pacman >/dev/null 2>&1; then
             TK_CMD=(sudo pacman -S --needed --noconfirm nvidia-container-toolkit)
         elif command -v apt-get >/dev/null 2>&1 && apt-cache show nvidia-container-toolkit >/dev/null 2>&1; then
             TK_CMD=(sudo apt-get install -y nvidia-container-toolkit)
@@ -324,6 +466,7 @@ if [[ "$VENDOR" == nvidia ]]; then
             TK_CMD=(sudo zypper --non-interactive install nvidia-container-toolkit)
         fi
 
+        if [[ "${TK_DONE:-0}" -ne 1 ]]; then
         if [[ "${#TK_CMD[@]}" -eq 0 ]]; then
             error "It isn't in your configured package repos. Add NVIDIA's repo and install it:"
             error "  https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html"
@@ -343,10 +486,9 @@ if [[ "$VENDOR" == nvidia ]]; then
             error "Toolkit install failed — see the output above."
             exit 1
         fi
-        if command -v systemctl >/dev/null 2>&1; then
-            sudo systemctl restart docker || warn "Couldn't restart Docker — restart it yourself before continuing."
-        fi
+        restart_docker_service || warn "Couldn't restart Docker — restart it yourself before continuing."
         echo "  NVIDIA Container Toolkit installed."
+        fi
     fi
 fi
 
@@ -493,6 +635,10 @@ if [[ "${RAM_MB:-0}" -gt 0 ]]; then
     memswap_limit: ${LIMIT_MB}m
 "
         echo "  Memory limit: ${BOLD}$(( (LIMIT_MB + 512) / 1024 )) GB${RESET} of $(( (RAM_MB + 512) / 1024 )) GB RAM"
+        if [[ "$IS_WSL" -eq 1 ]]; then
+            echo "  (Under WSL2 this is WSL's memory allowance, not your Windows RAM. To raise it, set"
+            echo "   memory=<N>GB under [wsl2] in %UserProfile%\\.wslconfig, then run 'wsl --shutdown'.)"
+        fi
         echo "  (if the server hits it, only the server is stopped and restarted — not your desktop)"
     fi
 fi
@@ -621,6 +767,83 @@ if [[ ! -f "server/voice_patch/adapter_model.safetensors" ]]; then
 fi
 
 # -----------------------------------------------------------------------------
+# 5b. Voice patch: make sure adapter_model.safetensors is the real weights file,
+# not a Git LFS placeholder. *.safetensors are stored with Git LFS (see
+# .gitattributes), so a clone made without git-lfs installed (e.g. a fresh WSL
+# Ubuntu) leaves a ~130-byte text pointer in its place, and the container then
+# fails with "[voice-patch] ... header too large" on every start. Detect that
+# and offer to install git-lfs and fetch the real file.
+# -----------------------------------------------------------------------------
+PATCH_FILE="server/voice_patch/adapter_model.safetensors"
+
+patch_is_lfs_pointer() {
+    [[ -f "$PATCH_FILE" ]] || return 1
+    local first_bytes
+    first_bytes="$(head -c 64 "$PATCH_FILE" 2>/dev/null | tr -d '\0')"
+    [[ "$first_bytes" == "version https://git-lfs"* ]]
+}
+
+if patch_is_lfs_pointer; then
+    warn "$PATCH_FILE is a Git LFS placeholder ($(wc -c < "$PATCH_FILE") bytes), not the real weights."
+    warn "This usually means the repo was cloned without git-lfs installed. Left as it is, the"
+    warn "container would fail at the voice-patch step on every start."
+
+    if [[ ! -d .git ]] || ! command -v git >/dev/null 2>&1; then
+        error "This isn't a git checkout (or git is missing), so the real file can't be fetched here."
+        error "Copy the real adapter_model.safetensors (about 100 MB) into server/voice_patch/ and re-run."
+        exit 1
+    fi
+
+    if ! git lfs version >/dev/null 2>&1; then
+        LFS_UPDATE=0
+        if command -v pacman >/dev/null 2>&1; then
+            LFS_INSTALL=(sudo pacman -S --needed --noconfirm git-lfs)
+        elif command -v apt-get >/dev/null 2>&1; then
+            LFS_INSTALL=(sudo apt-get install -y git-lfs); LFS_UPDATE=1
+        elif command -v dnf >/dev/null 2>&1; then
+            LFS_INSTALL=(sudo dnf install -y git-lfs)
+        elif command -v zypper >/dev/null 2>&1; then
+            LFS_INSTALL=(sudo zypper --non-interactive install git-lfs)
+        else
+            error "Couldn't find a supported package manager. Install git-lfs yourself, then re-run."
+            exit 1
+        fi
+        if [[ "$LFS_UPDATE" -eq 1 ]]; then
+            echo "  This will run: sudo apt-get update && ${LFS_INSTALL[*]}"
+        else
+            echo "  This will run: ${LFS_INSTALL[*]}"
+        fi
+        read -rp "  Install git-lfs now? [Y/n]: " do_lfs
+        do_lfs="${do_lfs:-Y}"
+        if [[ ! "$do_lfs" =~ ^[Yy] ]]; then
+            error "Without git-lfs the voice patch can't be fetched. Install it, run 'git lfs install' and"
+            error "'git lfs pull', then re-run this script."
+            exit 1
+        fi
+        [[ "$LFS_UPDATE" -eq 1 ]] && sudo apt-get update
+        if ! "${LFS_INSTALL[@]}"; then
+            error "git-lfs install failed — see the output above."
+            exit 1
+        fi
+    fi
+
+    info "Fetching the real voice patch with git lfs..."
+    git lfs install
+    if ! git lfs pull; then
+        error "git lfs pull failed. If the repo host doesn't have the LFS file, copy the real"
+        error "adapter_model.safetensors (about 100 MB) into server/voice_patch/ yourself."
+        exit 1
+    fi
+    ls -l "$PATCH_FILE"
+    if patch_is_lfs_pointer; then
+        error "$PATCH_FILE is still a placeholder after git lfs pull."
+        error "Copy the real adapter_model.safetensors (about 100 MB) into server/voice_patch/ and re-run."
+        exit 1
+    fi
+    echo "  Voice patch file OK."
+fi
+
+# -----------------------------------------------------------------------------
 # 6. Build (or reuse an existing image) and start
 # -----------------------------------------------------------------------------
 IMAGE_EXISTS=0
@@ -639,6 +862,18 @@ if [[ "$IMAGE_EXISTS" -eq 1 ]]; then
     fi
 fi
 
+# When building, also ask whether to start the container afterwards or stop
+# after the image is built (e.g. to build now and start later).
+DO_START=1
+if [[ "$DO_BUILD" -eq 1 ]]; then
+    echo
+    read -rp "  Start the container right away, or just build the image? [S]tart / [B]uild only: " start_choice
+    start_choice="${start_choice:-S}"
+    if [[ "$start_choice" =~ ^[Bb] ]]; then
+        DO_START=0
+    fi
+fi
+
 echo
 info "Ready to go. This will:"
 if [[ "$DO_BUILD" -eq 1 ]]; then
@@ -646,8 +881,13 @@ if [[ "$DO_BUILD" -eq 1 ]]; then
 else
     echo "    - Reuse the existing ${IMAGE_TAG} image (no build)"
 fi
-echo "    - On first start on a fresh volume, download the ~12 GB model + apply the voice patch"
-echo "    - Expose the server on host port ${HOST_PORT}"
+if [[ "$DO_START" -eq 1 ]]; then
+    echo "    - Start the container"
+    echo "    - On first start on a fresh volume, download the ~12 GB model + apply the voice patch"
+    echo "    - Expose the server on host port ${HOST_PORT}"
+else
+    echo "    - NOT start the container (start it later with: ${COMPOSE} up -d)"
+fi
 echo
 read -rp "Proceed now? [Y/n]: " proceed
 proceed="${proceed:-Y}"
@@ -662,8 +902,30 @@ if [[ "$DO_BUILD" -eq 1 ]]; then
     "${COMPOSE_CMD[@]}" build --no-cache
 fi
 
+if [[ "$DO_START" -eq 0 ]]; then
+    echo
+    info "Image built. Start it whenever you like with:"
+    echo "  ${COMPOSE} up -d"
+    exit 0
+fi
+
 info "Starting..."
 "${COMPOSE_CMD[@]}" up -d
+
+if [[ "$IS_WSL" -eq 1 ]]; then
+    WSL_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+    echo
+    info "WSL networking: reaching the server from other devices on your LAN"
+    echo "  From Windows itself, http://localhost:${HOST_PORT} works as-is. Other devices need one of:"
+    echo "  A) Mirrored networking (Windows 11 22H2+): in %UserProfile%\\.wslconfig add"
+    echo "         [wsl2]"
+    echo "         networkingMode=mirrored"
+    echo "     then 'wsl --shutdown'. Allow the port in Windows Firewall (PowerShell, as admin):"
+    echo "         New-NetFirewallRule -DisplayName PoneTTS -Direction Inbound -Protocol TCP -LocalPort ${HOST_PORT} -Action Allow"
+    echo "  B) Port proxy (PowerShell, as admin; WSL IP is ${WSL_IP:-<unknown>} and changes on restart):"
+    echo "         netsh interface portproxy add v4tov4 listenport=${HOST_PORT} listenaddress=0.0.0.0 connectport=${HOST_PORT} connectaddress=${WSL_IP:-<WSL-IP>}"
+    echo "         New-NetFirewallRule -DisplayName PoneTTS -Direction Inbound -Protocol TCP -LocalPort ${HOST_PORT} -Action Allow"
+fi
 
 echo
 info "Done. Following logs (Ctrl+C to stop watching — the container keeps running):"
