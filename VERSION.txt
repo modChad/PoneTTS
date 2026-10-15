@@ -14,14 +14,20 @@ AMD (ROCm) SUPPORT IS HIGHLY EXPERIMENTAL
   Expect problems on other AMD cards, and don't rely on it yet.
 
 
-QUICK START (Linux)
--------------------
+QUICK START (Linux, or Windows via WSL2)
+-----------------------------------------
   ./run.sh
 
   Installs any missing Docker pieces (CLI, Engine, Compose, buildx) after
   asking, detects your GPU and VRAM, picks a preset, writes
   docker-compose.yml, then builds and starts the server. Not on Linux, or
   want to do it by hand? See DISTRIBUTING.md.
+
+  Windows: install WSL2 + Ubuntu, install the NVIDIA driver on Windows
+  (not in WSL), clone into ~/PoneTTS (not /mnt/c) and run ./run.sh there.
+  run.sh detects WSL, installs the NVIDIA Container Toolkit from NVIDIA's
+  apt repo, and prints LAN-access steps (mirrored networking or netsh
+  portproxy). The voice patch needs git-lfs; run.sh offers to install it.
 
   Before running: your GPU driver must work outside Docker (nvidia-smi or
   rocm-smi should list your card). On NVIDIA, run.sh also checks for the
@@ -76,6 +82,7 @@ FEATURES
       /set_tts_settings
     /st_cache/generate, /st_cache/         server-side clip cache
     /sfx                                   sound effects (Freesound / BBC)
+    /voice_fx                              per-voice audio effects (web UI)
     /preset, /voice_blend, /normalize,     tuning and diagnostics
       /gpu, /health, /speakers
     /                                      browser test page
@@ -90,6 +97,11 @@ FEATURES
       client_pronunciations overrides
     - Optional Whisper-based pronunciation check (MOSS_FIX_PRON,
       MOSS_AUTO_RESPELL; off by default)
+
+  Voice effects and streaming
+    - robot, radio, cavern, helium, changeling: set per voice in the web
+      page, applied for every caller (webui, SillyTavern, PPP)
+    - /tts_stream/ streams sentence by sentence
 
   Operations
     - Request log shows which client called: webui, sillytavern,
