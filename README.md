@@ -15,7 +15,7 @@ Self-hosted text-to-speech server for the **[MOSS-TTS-PNY](https://huggingface.c
 
 | | NVIDIA (supported) | AMD (experimental) |
 |---|---|---|
-| OS | Linux | Linux |
+| OS | Linux, or Windows 11/10 via WSL2 | Linux |
 | GPU memory | ~6 GB minimum, see [presets](#performance-presets) | ~8 GB tested |
 | Host driver | `nvidia-smi` lists your card | `rocm-smi` lists your card |
 | Extra | [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) | User in the `video` and `render` groups |
@@ -23,6 +23,8 @@ Self-hosted text-to-speech server for the **[MOSS-TTS-PNY](https://huggingface.c
 | Disk | ~12 GB for the model, plus the image | ~12 GB for the model, plus a larger image |
 
 The GPU driver must work **outside** Docker first. Docker only passes the GPU through; it can't fix a broken host driver.
+
+**Git LFS:** the voice patch (`server/voice_patch/adapter_model.safetensors`) is stored with Git LFS. Without `git-lfs`, a clone leaves a tiny placeholder and the container fails with `SafetensorError: header too large`. `run.sh` detects this and offers to install `git-lfs` and run `git lfs pull`.
 
 ## Quick start
 
@@ -34,12 +36,13 @@ cd PoneTTS
 
 `run.sh`:
 
+0. Detects WSL (see below) and checks the voice patch isn't a Git LFS placeholder, offering to install `git-lfs` and fetch it.
 1. Checks for the Docker CLI, Engine, Compose and buildx, and offers to install anything missing (pacman, apt, dnf or zypper). It always asks before installing.
 2. Detects your GPU vendor and VRAM, and on NVIDIA checks for the NVIDIA Container Toolkit.
 3. Suggests a performance preset. You can accept it or pick your own.
 4. Asks for a port (default `8800`) and whether `/sfx` may fetch sound effects from the internet.
 5. Writes `docker-compose.yml` for your hardware, including a RAM cap so running out of memory restarts the server instead of your desktop.
-6. Builds the image and starts it.
+6. Asks whether to start the container right away or only build the image, then builds (and starts) it.
 
 **First start takes a while.** The container downloads the ~12 GB model into a Docker volume, which can take up to ~20 minutes. Later starts skip this.
 
@@ -57,6 +60,19 @@ It's ready when you see:
 ```
 
 Then open `http://localhost:8800/` for the test page.
+
+### Windows (WSL2)
+
+1. In PowerShell (admin): `wsl --install -d Ubuntu-22.04`, then reboot.
+2. Install the latest NVIDIA driver **on Windows**. Do not install a Linux driver inside WSL. `nvidia-smi` inside Ubuntu must list your card.
+3. Inside Ubuntu, clone the repo into the WSL filesystem (e.g. `~/PoneTTS`, **not** `/mnt/c/...`) and run `./run.sh`.
+
+`run.sh` detects WSL and then: offers to install Docker (starting it with `sudo service docker start` if systemd is off), installs the NVIDIA Container Toolkit from NVIDIA's apt repo (pinned to `1.20.1-1`, override with `NVIDIA_CONTAINER_TOOLKIT_VERSION`), warns about `/mnt/c` paths and CRLF line endings, and prints the steps for reaching the server from other devices.
+
+- **Memory:** the RAM limit is based on WSL's allowance. Raise it with `memory=<N>GB` under `[wsl2]` in `%UserProfile%\.wslconfig`, then `wsl --shutdown`.
+- **Start Docker at boot:** add `[boot]` / `systemd=true` to `/etc/wsl.conf`, then `wsl --shutdown`.
+- **Other devices on your LAN:** `localhost:8800` works from Windows. For other devices, either set `networkingMode=mirrored` under `[wsl2]` in `.wslconfig`, or run (admin PowerShell) `netsh interface portproxy add v4tov4 listenport=8800 listenaddress=0.0.0.0 connectport=8800 connectaddress=<WSL IP>` (get the IP with `hostname -I`; it changes on restart), plus an inbound firewall rule for the port.
+- **AMD** isn't supported under WSL2.
 
 ## Adding it to an existing Compose setup
 
@@ -238,6 +254,14 @@ Use either TTS provider:
 
 Use the container name (`pone-ttsmod`) when SillyTavern runs in a container on the same Docker network. Otherwise use the host's IP address.
 
+## Voice effects
+
+Each voice can have its own audio effect: `robot`, `radio`, `cavern`, `helium` or `changeling` (the original voice plus two extra tracks pitched -2 and -4 semitones). Choose it in the **Voice effect** box under the voice selector on the web page. The setting belongs to the voice, so it applies to every caller (web page, SillyTavern, Pony Pony Paradise). Settings are stored in `voice_fx.json` inside the container and reset if the container is recreated. Scripts can use `GET/POST /voice_fx`.
+
+## Streaming
+
+`/tts_stream/` (the SillyTavern XTTSv2 streaming endpoint) sends audio sentence by sentence, so playback starts before a long paragraph finishes. Enable streaming in SillyTavern's XTTSv2 settings.
+
 ## Pronunciation
 
 The model reads raw text with no phonetic dictionary, so some words come out wrong. Fix them in `server/pronunciations.txt`, one per line:
@@ -257,7 +281,7 @@ Zecora = Zeh core ah
 
 ```text
 .
-├── run.sh                      # Linux setup: prerequisites, GPU detection, compose file, build
+├── run.sh                      # Linux/WSL2 setup: prerequisites, GPU detection, compose file, build
 ├── Dockerfile                  # Two build targets: runtime-cuda, runtime-rocm
 ├── docker-compose.snippet.yml  # Example service blocks (NVIDIA and AMD)
 ├── DISTRIBUTING.md             # Build notes for other machines
@@ -286,6 +310,9 @@ Zecora = Zeh core ah
 | `fork/exec /usr/bin/docker-proxy: no such file or directory` | Reinstall Docker and restart the service, or set `{"userland-proxy": false}` in `/etc/docker/daemon.json` |
 | Container restarts during the model download | Usually memory. Check `docker compose logs`: the entrypoint prints the exit code and free disk space |
 | `torch.cuda.is_available() is False` | GPU not passed through: check the NVIDIA Container Toolkit (NVIDIA), or the `/dev/kfd` and `/dev/dri` devices (AMD) |
+| `SafetensorError: header too large` in the voice-patch step | The voice patch is a Git LFS placeholder. Run `./run.sh` (it offers the fix), or `sudo apt install git-lfs && git lfs install && git lfs pull` |
+| `$'\r': command not found` (WSL) | CRLF line endings. `sed -i 's/\r$//' run.sh server/*.sh`; the repo's `.gitattributes` forces LF on new clones |
+| `could not select device driver "nvidia"` (WSL) | NVIDIA Container Toolkit missing or Docker not restarted: re-run `./run.sh`, or `sudo nvidia-ctk runtime configure --runtime=docker && sudo service docker restart` |
 | Can't reach the server from the browser | Check `docker compose ps` and your port mapping. After a kernel update on Arch, reboot so Docker's networking modules load |
 | `Temporary failure in name resolution` in the log | The container has no network. Same fix as above |
 
