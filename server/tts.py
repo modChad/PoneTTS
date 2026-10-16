@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-command control for the MOSS-TTS-PNY LAN server.
+"""One-command control for the PONE-TTS LAN server.
 
 Usage:
     ./tts.py start      # launch the server (detached, survives this shell)
