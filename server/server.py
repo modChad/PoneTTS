@@ -2076,6 +2076,15 @@ def normalize_preview(text: str = Query(..., min_length=1), expand_numbers: bool
     }
 
 
+def _hdr_safe(value, limit: int = 1000) -> str:
+    """Make a string legal as an HTTP header value: printable ASCII only (no
+    newlines/control characters, which make the server drop the connection and
+    the browser report "NetworkError"), whitespace collapsed, length capped."""
+    text = re.sub(r"[^\x20-\x7e]+", " ", str(value or ""))
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:limit]
+
+
 def _audio_response(out: dict, fmt: str) -> Response:
     if fmt == "base64":
         return JSONResponse(
@@ -2094,8 +2103,8 @@ def _audio_response(out: dict, fmt: str) -> Response:
             "X-Duration-Sec": f"{out['duration_sec']:.3f}",
             "X-Sample-Rate": str(out["sample_rate"]),
             # ASCII-safe so it's always a legal HTTP header value
-            "X-Normalized-Text": out.get("normalized_text", "").encode("ascii", "replace").decode(),
-            "X-Timing": out.get("timing", ""),
+            "X-Normalized-Text": _hdr_safe(out.get("normalized_text", ""), 1000),
+            "X-Timing": _hdr_safe(out.get("timing", ""), 1000),
         },
     )
 
