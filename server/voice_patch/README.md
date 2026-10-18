@@ -8,3 +8,8 @@ Voice identity and the emotion/energy controls are untouched.
 
 Applied automatically during setup by `apply_voice_patch.py` (merged into the
 downloaded checkpoint; the unpatched original is kept next to it).
+
+The adapter is stored with Git LFS. Clone with `git-lfs` installed (or run
+`git lfs install && git lfs pull`), otherwise the file is a ~130-byte
+placeholder and the voice-patch step fails with `header too large`.
+`./run.sh` detects this and offers to fix it.
