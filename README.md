@@ -154,6 +154,9 @@ Environment variables for the container:
 | `MOSS_LOOP_GUARD_MIN_HEARD` | `0.5` | If Whisper hears less than this share of a checked sentence's words, the sentence counts as failed and is regenerated |
 | `MOSS_FAILED_CLAUSE_RETRIES` | `2` | How many times a failed sentence is regenerated before it's sent as-is |
 | `MOSS_COMMA_SPLIT_MIN_WORDS` | `20` | Sentences longer than this are also split at commas (lists are kept together). `0` turns comma splitting off |
+| `MOSS_SENTENCE_PAUSE_SEC` | `0.12` | Silence inserted between sentences, in seconds. Lower is snappier |
+| `MOSS_COMMA_PAUSE_SEC` | `0.08` | Silence between pieces of a sentence split at commas |
+| `MOSS_PAUSE_SEC` | `0.35` | Silence at an em-dash or ellipsis (a deliberate pause) |
 | `MOSS_FIX_PRON` | `0` | Check rare words with Whisper and fix their pronunciation (slower) |
 | `MOSS_AUTO_RESPELL` | `0` | Automatically respell rare words phonetically |
 | `MOSS_DECODER_RUNTIME` | from preset | Override the vocoder: `onnx_cuda`, `onnx_cpu` or `onnx_hybrid` |
