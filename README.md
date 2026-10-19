@@ -257,6 +257,18 @@ Use either TTS provider:
 
 Use the container name (`pone-ttsmod`) when SillyTavern runs in a container on the same Docker network. Otherwise use the host's IP address.
 
+## Moods
+
+Put a tag in the text to set the mood: `[mood]`, `[mood:energy]` or `[mood:energy:strength]`, e.g. `[angry:0.8]`. Moods: neutral, happy, sad, angry, annoyed, fearful, surprised, calm, disgusted, shouting (plus aliases such as irritated, scared, joyful). Energy is `0`–`1` (default `0.5`); strength is `1.0`–`2.3`.
+
+A tag works anywhere in the text and applies until the next tag, so one request can change mood mid-way:
+
+```text
+Welcome to Ponyville. [irritated:1] I am here to tell you there is an update. [calm] Please read the instructions.
+```
+
+Text before the first tag uses the request's `style_*` fields, or Neutral.
+
 ## Voice effects
 
 Each voice can have its own audio effect: `robot`, `radio`, `cavern`, `helium` or `changeling` (the original voice plus two extra tracks pitched -2 and -4 semitones). Choose it in the **Voice effect** box under the voice selector on the web page. The setting belongs to the voice, so it applies to every caller (web page, SillyTavern, Pony Pony Paradise). Settings are stored in `voice_fx.json` inside the container and reset if the container is recreated. Scripts can use `GET/POST /voice_fx`.

@@ -1044,9 +1044,43 @@ def _synthesize(req: TTSRequest, client: str = "unspecified") -> dict:
     return out
 
 
+# A mood tag can also appear mid-text ("Hello. [angry:0.8] Get out!"): it changes the
+# mood from that point on. Only tags whose word is a known mood/alias count, so
+# ordinary bracketed text is left alone.
+_EMOTION_TAG_ANY = re.compile(
+    r"\[\s*([A-Za-z]+)\s*(?::\s*[0-9]*\.?[0-9]+\s*(?::\s*[0-9]*\.?[0-9]+\s*)?)?\]"
+)
+
+
+def _split_mood_segments(text: str, default_id: int, default_energy: float,
+                         default_strength: Optional[float]):
+    """Split text into (emotion_id, energy, strength, segment_text) pieces at mood
+    tags. A leading tag (any word) is handled as before; later tags only when the
+    word is a known mood."""
+    def resolve(eid, energy, strength):
+        if eid in FORBIDDEN_EMOTION_IDS:
+            eid = DEFAULT_EMOTION_ID
+        return EMOTION_REMAP.get(eid, eid), energy, (strength if strength is not None else default_strength)
+
+    eid, energy, strength, rest = parse_emotion_tag(text, default_id, default_energy)
+    cur = resolve(eid, energy, strength)
+    segments = []
+    pos = 0
+    for m in _EMOTION_TAG_ANY.finditer(rest):
+        if m.group(1).lower() not in _EMOTION_ALIASES:
+            continue
+        segments.append((*cur, rest[pos:m.start()]))
+        e2, en2, st2, _r = parse_emotion_tag(rest[m.start():], default_id, default_energy)
+        cur = resolve(e2, en2, st2)
+        pos = m.end()
+    segments.append((*cur, rest[pos:]))
+    return segments
+
+
 def _prepare_synth(req: TTSRequest):
-    """Validate + normalize a request; returns (text, mnt, temp, emo_id, energy,
-    strength). Shared by the one-shot and streaming paths so they behave alike."""
+    """Validate + normalize a request; returns (clauses, mnt, temp) where clauses is a
+    list of (text, gap_after_sec, emotion_id, energy, strength). Shared by the
+    one-shot and streaming paths so they behave alike."""
     if req.speaker_id not in SPEAKER_IDS:
         raise HTTPException(
             status_code=400,
@@ -1055,28 +1089,34 @@ def _prepare_synth(req: TTSRequest):
     assert _runner is not None, "model not loaded"
     mnt = req.max_new_tokens or _default_max_new_tokens
     temp = req.audio_temperature if req.audio_temperature is not None else _default_audio_temperature
-    # Pull a leading [emotion:energy(:strength)] tag off the text (AI-written, per
-    # line). A tag in the text wins; otherwise explicit request fields, then defaults.
-    emo_id, energy, tag_strength, raw = parse_emotion_tag(
+    # [emotion:energy(:strength)] tags (AI-written, per line or mid-text). A tag in
+    # the text wins; otherwise explicit request fields, then defaults.
+    segments = _split_mood_segments(
         req.text,
         default_id=req.style_emotion_id if req.style_emotion_id is not None else DEFAULT_EMOTION_ID,
         default_energy=req.style_energy if req.style_energy is not None else DEFAULT_ENERGY,
+        default_strength=req.style_strength,
     )
-    if emo_id in FORBIDDEN_EMOTION_IDS:      # belt-and-suspenders nonverbal guard
-        emo_id = DEFAULT_EMOTION_ID
-    emo_id = EMOTION_REMAP.get(emo_id, emo_id)
-    strength = tag_strength if tag_strength is not None else req.style_strength
-    text = (normalize_text(raw, expand_numbers=req.expand_numbers, auto_respell=req.auto_respell,
-                           client_pronunciations=req.client_pronunciations)
-            if req.normalize else raw)
-    if not text.strip():
+    clauses = []
+    for si, (emo_id, energy, strength, raw) in enumerate(segments):
+        text = (normalize_text(raw, expand_numbers=req.expand_numbers, auto_respell=req.auto_respell,
+                               client_pronunciations=req.client_pronunciations)
+                if req.normalize else raw)
+        if not text.strip():
+            continue
+        seg = _split_clauses(text)
+        for ci, (p, gap) in enumerate(seg):
+            clauses.append([p, gap, emo_id, energy, strength])
+        clauses[-1][1] = SENTENCE_PAUSE_SEC if si < len(segments) - 1 else clauses[-1][1]
+    if not clauses:
         raise HTTPException(status_code=400, detail="text is empty after normalization")
-    return text, mnt, temp, emo_id, energy, strength
+    clauses[-1][1] = 0.0
+    return [tuple(c) for c in clauses], mnt, temp
 
 
 def _synthesize_inner(req: TTSRequest) -> dict:
-    text, mnt, temp, emo_id, energy, strength = _prepare_synth(req)
-    return _synth_pauses(text, req, mnt, temp, emo_id, energy, strength)
+    clauses, mnt, temp = _prepare_synth(req)
+    return _synth_pauses(clauses, req, mnt, temp)
 
 
 PAUSE_SEC = float(os.environ.get("MOSS_PAUSE_SEC", "0.35"))        # real silence inserted per pause mark (em-dash/ellipsis)
@@ -1235,8 +1275,7 @@ def _synthesize_stream(req: TTSRequest, client: str = "unspecified"):
     the request shows up in (and can be cancelled from) the activity list like
     any other. The ticket is re-bound on every chunk because the framework may
     run successive chunks on different worker threads."""
-    text, mnt, temp, emo_id, energy, strength = _prepare_synth(req)
-    clauses = _split_clauses(text)
+    clauses, mnt, temp = _prepare_synth(req)
 
     def gen():
         ticket = _ticket_open(client, req.text)
@@ -1245,7 +1284,7 @@ def _synthesize_stream(req: TTSRequest, client: str = "unspecified"):
         done = False
         fx = None
         try:
-            for p, gap_sec in clauses:
+            for p, gap_sec, emo_id, energy, strength in clauses:
                 _tl.ticket = ticket
                 try:
                     seg_mnt = min(mnt, max(96, len(p) * 3 + 64))
@@ -1307,17 +1346,15 @@ def _synthesize_stream(req: TTSRequest, client: str = "unspecified"):
     return gen()
 
 
-def _synth_pauses(text: str, req: TTSRequest, mnt: int, temp: float,
-                  emo_id: int, energy: float, strength: Optional[float]) -> dict:
+def _synth_pauses(clauses: list, req: TTSRequest, mnt: int, temp: float) -> dict:
     """Text is split into independently-synthesized clauses (see
     _split_clauses) and the pieces are joined with real silence. Splitting
     isn't just about honoring written pause marks anymore — short
     independent generations are inherently less prone to the mid-generation
     cutoffs/drift that long single generations are, so this is now also the
     main stability mechanism for long lines."""
-    clauses = _split_clauses(text)
     outs = []
-    for p, _gap in clauses:
+    for p, _gap, emo_id, energy, strength in clauses:
         # loop guard, part 1: budget tokens to the piece length (~14 tok/audio-
         # sec measured). When the model misses end-of-speech and repeats the
         # sentence, this stops it within seconds instead of at the service-wide
