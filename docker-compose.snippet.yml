@@ -48,10 +48,35 @@ services:
       - ./server/st_cache:/app/st_cache        # cache for the /st_cache/generate endpoint — visible/durable on the host
       - ./server/history:/app/history          # every generated line, playable from the web page (MOSS_HISTORY_MAX)
 
+    # Every value below is the built-in default (server.py already has it), so
+    # you only need to list the ones you change. Edit a value, then run
+    # `docker compose up -d` — that recreates the container with the new values,
+    # no image rebuild needed. (Full descriptions: README.md > Configuration.)
     environment:
       - MOSS_PERF_PRESET=balanced   # quality | balanced | low_vram | potato
-      # - MOSS_SFX_ALLOW_NETWORK=0  # uncomment to block /sfx from ever calling out to
-                                     # Freesound/BBC — it will only serve from its cache
+      - MOSS_SFX_ALLOW_NETWORK=1    # 0 = /sfx serves only from its cache, never calls out to Freesound/BBC
+      - MOSS_AUDIO_TEMPERATURE=0.85 # sampling temperature: lower = steadier, higher = more expressive
+      - MOSS_HISTORY_MAX=500        # generated lines kept in the history; 0 = history off
+
+      # Pauses between clauses (seconds)
+      - MOSS_SENTENCE_PAUSE_SEC=0.12  # between sentences
+      - MOSS_COMMA_PAUSE_SEC=0.08     # between comma-split pieces of one sentence
+      - MOSS_PAUSE_SEC=0.35           # at an em-dash / ellipsis
+
+      # Quality checks (stuck words, failed sentences)
+      - MOSS_FIX_STUCK_WORDS=1        # Whisper-check each sentence for stuck/droning words; 0 = much faster
+      - MOSS_LOOP_GUARD_REL_MULT=1.6  # sentence this many times longer than expected gets a Whisper repeat check
+      - MOSS_LOOP_GUARD_MIN_HEARD=0.5 # heard less than this share of the words = failed, regenerate
+      - MOSS_FAILED_CLAUSE_RETRIES=2  # regenerations of a failed sentence before sending it as-is
+      - MOSS_COMMA_SPLIT_MIN_WORDS=20 # sentences longer than this are also split at commas; 0 = never
+
+      # Pronunciation helpers (both off by default; pronunciations.txt always applies)
+      - MOSS_FIX_PRON=0               # verify rare words with Whisper and retry respellings (slower)
+      - MOSS_AUTO_RESPELL=0           # respell rare words phonetically before synthesis
+
+      # Not set by default — uncomment to override:
+      # - PORT=8800                   # port inside the container (see the network_mode note at the top)
+      # - MOSS_DECODER_RUNTIME=onnx_cpu  # onnx_cuda | onnx_cpu | onnx_hybrid; default comes from the preset
 
     networks:
       - your_shared_network   # <- replace with whatever network your ST service is on
@@ -105,6 +130,7 @@ networks:
 #     environment:
 #       - HSA_OVERRIDE_GFX_VERSION=11.0.0
 #       - MOSS_PERF_PRESET=balanced
+#       # The other variables from Option A work here too; list only what you change.
 #       # - MOSS_SFX_ALLOW_NETWORK=0
 #
 #     networks:
