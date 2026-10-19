@@ -1013,6 +1013,7 @@ def _history_add(out: dict, req: "TTSRequest", client: str) -> None:
             "client": client,
             "text": req.text,
             "duration_sec": round(float(out.get("duration_sec", 0.0)), 2),
+            "gen_sec": round(float(out["gen_sec"]), 1) if out.get("gen_sec") is not None else None,
             "temperature": req.audio_temperature if req.audio_temperature is not None
                            else _default_audio_temperature,
             "preset": _active_preset,
@@ -1032,6 +1033,7 @@ def _history_add(out: dict, req: "TTSRequest", client: str) -> None:
 def _synthesize(req: TTSRequest, client: str = "unspecified") -> dict:
     """Entry point for every generating endpoint: tracks the request so it can
     be cancelled (and shown as active), then saves the result to history."""
+    t_start = time.time()
     ticket = _ticket_open(client, req.text)
     _tl.ticket = ticket
     try:
@@ -1040,6 +1042,7 @@ def _synthesize(req: TTSRequest, client: str = "unspecified") -> dict:
         _tl.ticket = None
         _ticket_close(ticket)
     out = _fx_apply_to_out(out, req.speaker_id)     # the voice's own effect, if one is set
+    out["gen_sec"] = time.time() - t_start          # wall-clock time to generate (shown in history)
     _history_add(out, req, client)
     return out
 
@@ -1278,6 +1281,7 @@ def _synthesize_stream(req: TTSRequest, client: str = "unspecified"):
     clauses, mnt, temp = _prepare_synth(req)
 
     def gen():
+        t_start = time.time()
         ticket = _ticket_open(client, req.text)
         pieces = []
         sr = 0
@@ -1339,7 +1343,8 @@ def _synthesize_stream(req: TTSRequest, client: str = "unspecified"):
                         h.setsampwidth(2)
                         h.setframerate(sr)
                         h.writeframes(raw)
-                    _history_add({"wav": buf.getvalue(), "duration_sec": len(raw) / 2 / sr},
+                    _history_add({"wav": buf.getvalue(), "duration_sec": len(raw) / 2 / sr,
+                                  "gen_sec": time.time() - t_start},
                                  req, client)
                 except Exception as exc:  # noqa: BLE001 - history must never break a request
                     print(f"[history] not saved ({exc})", flush=True)
@@ -2550,7 +2555,7 @@ async function loadHistory(){
   const list=$('hist'); list.replaceChildren();
   for(const it of j.items){
     const row=el('div','h');
-    row.appendChild(el('div','meta', it.time.replace('T',' ')+'  ·  '+it.voice+'  ·  '+it.client+'  ·  '+it.duration_sec+'s  ·  temp '+it.temperature));
+    row.appendChild(el('div','meta', it.time.replace('T',' ')+'  ·  '+it.voice+'  ·  '+it.client+'  ·  '+it.duration_sec+'s'+(it.gen_sec!=null?' (took '+it.gen_sec+'s)':'')+'  ·  temp '+it.temperature));
     const t=el('div','txt', it.text); t.title='click to show all'; t.onclick=()=>t.classList.toggle('open');
     row.appendChild(t);
     const au=el('audio'); au.controls=true; au.preload='none'; au.src=it.url; row.appendChild(au);
