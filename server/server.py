@@ -1079,7 +1079,7 @@ def _synthesize_inner(req: TTSRequest) -> dict:
     return _synth_pauses(text, req, mnt, temp, emo_id, energy, strength)
 
 
-PAUSE_SEC = 0.45        # real silence inserted per pause mark (em-dash/ellipsis)
+PAUSE_SEC = float(os.environ.get("MOSS_PAUSE_SEC", "0.35"))        # real silence inserted per pause mark (em-dash/ellipsis)
 _PAUSE_MAX_SEGS = 6
 
 # Natural gap for a split clause boundary (sentences, and now colon/
@@ -1087,7 +1087,7 @@ _PAUSE_MAX_SEGS = 6
 # which represents a deliberate dramatic pause (an em-dash), not an ordinary
 # clause boundary. Using PAUSE_SEC's 0.45s between every clause of normal
 # dialogue would sound choppy/robotic.
-SENTENCE_PAUSE_SEC = 0.25
+SENTENCE_PAUSE_SEC = float(os.environ.get("MOSS_SENTENCE_PAUSE_SEC", "0.12"))
 # Safety cap on total clause count after BOTH splits combined (em-dash parts
 # further split into sentences) — same spirit as _PAUSE_MAX_SEGS, preventing
 # pathological input from generating an unbounded number of requests.
@@ -1126,7 +1126,7 @@ COMMA_PIECE_MAX_WORDS = 15   # grow a piece until the next part would pass this
 COMMA_PIECE_MIN_WORDS = 5    # never leave a piece shorter than this
 COMMA_LIST_ITEM_MAX_WORDS = 2  # a comma part this short is a list item: never split beside it
 # Gap after a comma piece - short, since it's a mid-sentence breath, not a stop.
-COMMA_PAUSE_SEC = 0.12
+COMMA_PAUSE_SEC = float(os.environ.get("MOSS_COMMA_PAUSE_SEC", "0.08"))
 _COMMA_SPLIT_RE = re.compile(r"(?<=,)\s+")
 
 
