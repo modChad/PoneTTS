@@ -47,6 +47,7 @@ services:
       - ./server/voice_patch:/app/voice_patch  # optional pronunciation-fix LoRA; missing is non-fatal
       - ./server/st_cache:/app/st_cache        # cache for the /st_cache/generate endpoint — visible/durable on the host
       - ./server/history:/app/history          # every generated line, playable from the web page (MOSS_HISTORY_MAX)
+      - ./server/pronunciations.txt:/app/pronunciations.txt  # edited from the web page's Pronunciations button; survives rebuilds
 
     # Every value below is the built-in default (server.py already has it), so
     # you only need to list the ones you change. Edit a value, then run

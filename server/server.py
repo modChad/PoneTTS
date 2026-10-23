@@ -2127,6 +2127,31 @@ def sfx(query: str = Query(..., min_length=2, max_length=120)):
     return Response(data, media_type="audio/mpeg")
 
 
+@app.get("/pronunciations")
+def pronunciations_get():
+    """The raw pronunciations.txt, for the web page's editor."""
+    try:
+        text = PRONUNCIATION_FILE.read_text(encoding="utf-8") if PRONUNCIATION_FILE.exists() else ""
+    except OSError as exc:
+        raise HTTPException(500, f"cannot read pronunciations.txt: {exc}")
+    return {"text": text, "entries": len(load_pronunciations())}
+
+
+@app.put("/pronunciations")
+def pronunciations_put(payload: dict = Body(...)):
+    """Replace pronunciations.txt (the master list: always applied first, hot-
+    reloaded, so the next request uses it). Written in place so a bind-mounted
+    file keeps working."""
+    text = payload.get("text")
+    if not isinstance(text, str) or len(text) > 500_000:
+        raise HTTPException(400, "text must be a string under 500 KB")
+    try:
+        PRONUNCIATION_FILE.write_text(text.replace("\r\n", "\n"), encoding="utf-8")
+    except OSError as exc:
+        raise HTTPException(500, f"cannot write pronunciations.txt: {exc}")
+    return {"saved": True, "entries": len(load_pronunciations())}
+
+
 @app.get("/normalize")
 def normalize_preview(text: str = Query(..., min_length=1), expand_numbers: bool = True,
                       auto_respell: bool = True):
@@ -2534,6 +2559,40 @@ fxInit();
 
 _PAGE_EXTRA_JS = """<script>
 const $ = id => document.getElementById(id);
+async function pronToggle(){
+  const b=$('pronbox'); b.hidden=!b.hidden;
+  if(!b.hidden){
+    try{ const j=await (await fetch('/pronunciations')).json();
+      $('ptxt').value=j.text; $('pronent').textContent=j.entries+' entries'; $('pronst').textContent='';
+    }catch(e){ $('pronst').textContent='load failed: '+e; }
+  }
+}
+function pronAdd(){
+  const w=$('pw').value.trim().toLowerCase(), r=$('pr').value.trim();
+  if(!w||!r) return;
+  const lines=$('ptxt').value.split('\\n'); let hit=false;
+  for(let i=0;i<lines.length;i++){
+    const k=lines[i].split('#')[0].split('=')[0].trim().toLowerCase();
+    if(lines[i].includes('=') && k===w){ lines[i]=w+' = '+r; hit=true; }
+  }
+  if(!hit){ if(lines.length&&lines[lines.length-1]==='') lines.pop(); lines.push(w+' = '+r); lines.push(''); }
+  $('ptxt').value=lines.join('\\n'); $('pw').value=''; $('pr').value='';
+  pronSave(true);
+}
+async function pronSave(speak){
+  try{
+    const r=await fetch('/pronunciations',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:$('ptxt').value})});
+    if(!r.ok){ $('pronst').textContent='save failed: '+(await r.json()).detail; return; }
+    const j=await r.json(); $('pronent').textContent=j.entries+' entries'; $('pronst').textContent='saved, applies to the next request';
+    if(speak) go();
+  }catch(e){ $('pronst').textContent='save failed: '+e; }
+}
+async function pronCheck(){
+  try{
+    const j=await (await fetch('/normalize?text='+encodeURIComponent($('t').value))).json();
+    $('pronst').textContent='model receives: '+j.normalized;
+  }catch(e){ $('pronst').textContent='check failed: '+e; }
+}
 async function stopGen(scope){
   if(scope==='all' && !confirm('Stop every generation, including the VN and SillyTavern?')) return;
   try{
@@ -2638,7 +2697,18 @@ button.stop{{background:#fbe9e9;border:1px solid #d99}} button.small{{flex:0 0 a
 <div class=row><button id=speak onclick=go()>Speak</button>
 <button id=stopmine class=stop onclick="stopGen('mine')" hidden>Stop mine</button>
 <button id=stopall class=stop onclick="stopGen('all')" title="Cancel every client's generations (VN, SillyTavern, this page)">Stop all</button></div>
-<p id=st></p><audio id=a controls></audio>
+<p id=st></p><div class=row style="align-items:center"><audio id=a controls style="flex:1"></audio>
+<button class=small onclick=pronToggle() title="Edit pronunciations.txt: the master respelling list, applied before every request">Pronunciations</button></div>
+<div class=box id=pronbox hidden><div class=row><strong style="flex:1">Pronunciations</strong>
+<span id=pronent style="font-size:14px;color:#555"></span></div>
+<div class=row><input id=pw placeholder="word" style="flex:1;font-size:16px;padding:6px">
+<span>=</span><input id=pr placeholder="how it should sound" style="flex:2;font-size:16px;padding:6px">
+<button class=small onclick=pronAdd()>Add</button></div>
+<textarea id=ptxt rows=10 spellcheck=false style="font-family:monospace;font-size:14px"></textarea>
+<div class=row><button class=small onclick="pronSave(false)">Save</button>
+<button class=small onclick="pronSave(true)">Save &amp; speak</button>
+<button class=small onclick=pronCheck() title="Show the text the model will actually receive">Check text</button></div>
+<p id=pronst style="font-size:14px;color:#555"></p></div>
 <p id=act></p>
 <div class=box id=histbox><div class=row><strong style="flex:1">History</strong>
 <select id=hvoice onchange=loadHistory()><option value="">all voices</option></select>

@@ -693,6 +693,7 @@ ${MEM_LIMIT_LINES}    deploy:
 ${SFX_VOLUME_LINE}      - ./server/voice_patch:/app/voice_patch   # drop adapter_model.safetensors here if missing — no rebuild needed
       - ./server/st_cache:/app/st_cache             # cache for the /st_cache/generate endpoint — visible/durable on the host
       - ./server/history:/app/history               # every generated line, playable from the web page (MOSS_HISTORY_MAX)
+      - ./server/pronunciations.txt:/app/pronunciations.txt  # edited from the web page's Pronunciations button
     environment:
       - MOSS_PERF_PRESET=${PRESET}
       - MOSS_SFX_ALLOW_NETWORK=${SFX_ALLOW_NETWORK}
@@ -744,6 +745,7 @@ ${MEM_LIMIT_LINES}    devices:
 ${SFX_VOLUME_LINE}      - ./server/voice_patch:/app/voice_patch   # drop adapter_model.safetensors here if missing — no rebuild needed
       - ./server/st_cache:/app/st_cache             # cache for the /st_cache/generate endpoint — visible/durable on the host
       - ./server/history:/app/history               # every generated line, playable from the web page (MOSS_HISTORY_MAX)
+      - ./server/pronunciations.txt:/app/pronunciations.txt  # edited from the web page's Pronunciations button
     environment:
       - MOSS_PERF_PRESET=${PRESET}
       - MOSS_SFX_ALLOW_NETWORK=${SFX_ALLOW_NETWORK}
