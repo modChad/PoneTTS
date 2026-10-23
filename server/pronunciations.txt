@@ -1,4 +1,4 @@
-# Pronunciation overrides for MOSS-TTS.
+# Pronunciation overrides for PoneTTS.
 #
 # The model has no phonemizer — it reads the raw text — so some words just come
 # out wrong (e.g. it says "beg" like "borg"). The only fix is to spell the word
@@ -14,7 +14,9 @@
 #   or just listen — the file HOT-RELOADS, so no restart needed. Edit, re-request.
 #
 # Tips for coaxing the right sound:
-# - Split into syllables with spaces:   colonel = ker nel
+# - Prefer ONE joined respelling over spaced syllables:   hyperbole = hyperbuhlee
+#   Spaces make the model say separate words, with a slightly stilted rhythm.
+#   Only use spaces if a joined spelling won't come out right.
 # - Double letters / add vowels to hit a vowel:   beg = behg     roof = ruhf
 # - Respell phonetically:   Rarity = Rare it ee     Zecora = Zeh core ah
 # - For names it mangles, spell them how they sound.
@@ -23,4 +25,4 @@
 beg = behg
 colonel = kernel
 # Add words here as you catch the model saying them wrong. Spell what you HEAR,
-# in syllables, e.g.:   genre = zhon ra      hyperbole = hy per buh lee
+# as one word where you can, e.g.:   genre = zhonra      hyperbole = hyperbuhlee

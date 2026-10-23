@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Launch the PONE-TTS LAN server.
+# Launch the PoneTTS LAN server.
 # Pre-sets LD_LIBRARY_PATH to the venv's bundled NVIDIA libs so the runtime does
 # not need to os.execv-restart the process (which breaks under chdir).
 set -euo pipefail

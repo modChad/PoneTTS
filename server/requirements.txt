@@ -1,4 +1,4 @@
-# Python deps for the MOSS-TTS-PNY server.
+# Python deps for the PoneTTS server.
 # torch/torchaudio must come from the CUDA 12.8 index — setup.sh handles that.
 # These versions are what the mod was built and tested against.
 transformers==4.55.0

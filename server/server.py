@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""LAN TTS server for PONE-TTS.
+"""LAN TTS server for PoneTTS.
 
 Exposes an HTTP API so any device on the local network can request voiced lines
 with a chosen speaker. Designed as the TTS backend for an interactive visual novel.
@@ -859,7 +859,7 @@ class TTSRequest(BaseModel):
     style_strength: Optional[float] = None    # emotion over-drive: 1.0 normal, >1 exaggerates (clamped 0..2.3; past ~2.3 the model destabilizes)
 
 
-app = FastAPI(title="PONE-TTS LAN server")
+app = FastAPI(title="PoneTTS LAN server")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -2833,7 +2833,7 @@ def build_runner(preset: str, max_new_tokens: Optional[int] = None) -> None:
     # env still wins (back-compat / power users): MOSS_DECODER_RUNTIME overrides vocoder
     decoder_runtime = _resolve_vocoder(os.environ.get("MOSS_DECODER_RUNTIME", cfg_p["vocoder"]))
     _default_max_new_tokens = max_new_tokens or cfg_p["tokens"]
-    print(f"[server] loading PONE-TTS (preset={preset}, first call compiles ~1-2 min)...", flush=True)
+    print(f"[server] loading PoneTTS (preset={preset}, first call compiles ~1-2 min)...", flush=True)
     quant = os.environ.get("MOSS_QUANT", cfg_p.get("quant", "none"))
     cfg = OptimizedTTSConfig(
         decoder_runtime=decoder_runtime,

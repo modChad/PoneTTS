@@ -1,4 +1,4 @@
-# PONE-TTS voice server
+# PoneTTS voice server
 
 Local text-to-speech server for the **MOSS-TTS-PNY** model (My Little Pony + Team
 Fortress 2 character voices). It runs on your own NVIDIA GPU and serves audio over HTTP

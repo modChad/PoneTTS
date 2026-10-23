@@ -1,7 +1,7 @@
 PoneTTS
 =======
 
-Docker bundle for the PONE-TTS voice server: 43 voices (0-32 My Little
+Docker bundle for the PoneTTS voice server: 43 voices (0-32 My Little
 Pony, 33-42 Team Fortress 2), 48 kHz mono WAV. Voice backend for Pony Pony
 Paradise (PPP) and SillyTavern.
 

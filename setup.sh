@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-shot setup for the PONE-TTS server (Linux + NVIDIA GPU).
+# One-shot setup for the PoneTTS server (Linux + NVIDIA GPU).
 #
 # Creates a venv, installs deps, downloads the model (~12 GB) from HuggingFace,
 # and applies the v2.5 voice patch (pronunciation fix). Run once, then start with:
