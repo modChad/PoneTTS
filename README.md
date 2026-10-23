@@ -156,6 +156,7 @@ Environment variables for the container:
 | `MOSS_COMMA_SPLIT_MIN_WORDS` | `20` | Sentences longer than this are also split at commas (lists are kept together). `0` turns comma splitting off |
 | `MOSS_SENTENCE_PAUSE_SEC` | `0.12` | Silence inserted between sentences, in seconds. Lower is snappier |
 | `MOSS_COMMA_PAUSE_SEC` | `0.08` | Silence between pieces of a sentence split at commas |
+| `MOSS_STREAM_BUFFER_SEC` | `3` | Streaming only: seconds of audio generated before playback starts (`0` = off, large = wait for the whole line) |
 | `MOSS_PAUSE_SEC` | `0.35` | Silence at an em-dash or ellipsis (a deliberate pause) |
 | `MOSS_FIX_PRON` | `0` | Check rare words with Whisper and fix their pronunciation (slower) |
 | `MOSS_AUTO_RESPELL` | `0` | Automatically respell rare words phonetically |

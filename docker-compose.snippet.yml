@@ -61,6 +61,7 @@ services:
       # Pauses between clauses (seconds)
       - MOSS_SENTENCE_PAUSE_SEC=0.12  # between sentences
       - MOSS_COMMA_PAUSE_SEC=0.08     # between comma-split pieces of one sentence
+      - MOSS_STREAM_BUFFER_SEC=3      # seconds of audio to generate before streaming starts (0 = off)
       - MOSS_PAUSE_SEC=0.35           # at an em-dash / ellipsis
 
       # Quality checks (stuck words, failed sentences)

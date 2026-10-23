@@ -1122,6 +1122,7 @@ def _synthesize_inner(req: TTSRequest) -> dict:
     return _synth_pauses(clauses, req, mnt, temp)
 
 
+STREAM_BUFFER_SEC = float(os.environ.get("MOSS_STREAM_BUFFER_SEC", "3"))  # audio generated before a /tts_stream/ response starts (0 = off)
 PAUSE_SEC = float(os.environ.get("MOSS_PAUSE_SEC", "0.35"))        # real silence inserted per pause mark (em-dash/ellipsis)
 _PAUSE_MAX_SEGS = 6
 
@@ -1348,7 +1349,31 @@ def _synthesize_stream(req: TTSRequest, client: str = "unspecified"):
                                  req, client)
                 except Exception as exc:  # noqa: BLE001 - history must never break a request
                     print(f"[history] not saved ({exc})", flush=True)
-    return gen()
+    return _prebuffer(gen(), STREAM_BUFFER_SEC)
+
+
+def _prebuffer(chunks, seconds: float):
+    """Holds the stream back until `seconds` of audio are generated (or the line
+    is finished), then releases it and passes the rest through live. Stops a
+    player that is faster than the generator from starving between sentences."""
+    if seconds <= 0:
+        yield from chunks
+        return
+    held, nbytes, sr, released = [], 0, 0, False
+    for chunk in chunks:
+        if released:
+            yield chunk
+            continue
+        held.append(chunk)
+        if len(held) == 1 and chunk[:4] == b"RIFF":      # the WAV header: read the sample rate
+            sr = int.from_bytes(chunk[24:28], "little")
+            continue
+        nbytes += len(chunk)
+        if sr and nbytes / (sr * 2) >= seconds:
+            released = True
+            yield from held
+            held = []
+    yield from held                                       # short line: send it all now
 
 
 def _synth_pauses(clauses: list, req: TTSRequest, mnt: int, temp: float) -> dict:
