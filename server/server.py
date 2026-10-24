@@ -28,7 +28,7 @@ import unicodedata
 import wave
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 # The runtime may os.execv-restart this process (to set LD_LIBRARY_PATH) using
 # sys.argv. We chdir below, so argv[0] must be absolute or the re-exec can't find
@@ -1288,6 +1288,10 @@ def _synthesize_stream(req: TTSRequest, client: str = "unspecified"):
         sr = 0
         done = False
         fx = None
+        n_clauses = len(clauses)
+        n_done = 0
+        audio_sec = 0.0
+        print(f"[stream] start client={client} voice={req.speaker_id} sentences={n_clauses}", flush=True)
         try:
             for p, gap_sec, emo_id, energy, strength in clauses:
                 _tl.ticket = ticket
@@ -1302,6 +1306,9 @@ def _synthesize_stream(req: TTSRequest, client: str = "unspecified"):
                 sr = o["sample_rate"]
                 with wave.open(io.BytesIO(o["wav"]), "rb") as h:
                     pcm = h.readframes(h.getnframes())
+                n_done += 1
+                audio_sec += len(pcm) / 2 / sr
+                print(f"[stream] sentence {n_done}/{n_clauses} generated: {len(pcm) / 2 / sr:.1f}s audio, {time.time() - t_start:.1f}s elapsed", flush=True)
                 if not pieces:
                     # sizes unknown up front, so 0xFFFFFFFF in both length fields
                     yield (b"RIFF" + (0xFFFFFFFF).to_bytes(4, "little") + b"WAVEfmt "
@@ -1333,6 +1340,10 @@ def _synthesize_stream(req: TTSRequest, client: str = "unspecified"):
                     pieces.append(chunk)
                     yield chunk
             done = True
+            print(f"[stream] finished: {n_done} sentences, {audio_sec:.1f}s audio in {time.time() - t_start:.1f}s", flush=True)
+        except GeneratorExit:
+            print(f"[stream] client disconnected after {n_done} of {n_clauses} sentences ({audio_sec:.1f}s audio, {time.time() - t_start:.1f}s elapsed); line not saved to history", flush=True)
+            raise
         finally:
             _ticket_close(ticket)
             if done and pieces:
@@ -1360,20 +1371,29 @@ def _prebuffer(chunks, seconds: float):
         yield from chunks
         return
     held, nbytes, sr, released = [], 0, 0, False
-    for chunk in chunks:
-        if released:
-            yield chunk
-            continue
-        held.append(chunk)
-        if len(held) == 1 and chunk[:4] == b"RIFF":      # the WAV header: read the sample rate
-            sr = int.from_bytes(chunk[24:28], "little")
-            continue
-        nbytes += len(chunk)
-        if sr and nbytes / (sr * 2) >= seconds:
-            released = True
-            yield from held
-            held = []
-    yield from held                                       # short line: send it all now
+    t0 = time.time()
+    try:
+        for chunk in chunks:
+            if released:
+                yield chunk
+                continue
+            held.append(chunk)
+            if len(held) == 1 and chunk[:4] == b"RIFF":      # the WAV header: read the sample rate
+                sr = int.from_bytes(chunk[24:28], "little")
+                continue
+            nbytes += len(chunk)
+            if sr and nbytes / (sr * 2) >= seconds:
+                released = True
+                print(f"[stream] buffer full ({nbytes / (sr * 2):.1f}s of audio after {time.time() - t0:.1f}s); sending", flush=True)
+                yield from held
+                held = []
+        if not released:
+            print(f"[stream] line finished before the buffer filled; sending it all ({time.time() - t0:.1f}s)", flush=True)
+        yield from held                                       # short line: send it all now
+    except GeneratorExit:
+        if not released:
+            print(f"[stream] client disconnected while the server was still buffering ({time.time() - t0:.1f}s waited, nothing sent yet)", flush=True)
+        raise
 
 
 def _synth_pauses(clauses: list, req: TTSRequest, mnt: int, temp: float) -> dict:
@@ -2294,7 +2314,7 @@ def _speaker_id_from_name(name: str) -> int:
 
 class XTTSCompatRequest(BaseModel):
     text: str
-    speaker_wav: str
+    speaker_wav: Union[str, int]   # SillyTavern sends a bare numeric voice id as a JSON number
     language: str = "en"
 
 
@@ -2303,7 +2323,7 @@ def xtts_compat_generate(req: XTTSCompatRequest, request: Request):
     """POST body: {"text", "speaker_wav", "language"} -> raw audio/wav bytes."""
     tts_req = TTSRequest(
         text=req.text,
-        speaker_id=_speaker_id_from_name(req.speaker_wav),
+        speaker_id=_speaker_id_from_name(str(req.speaker_wav)),
         language=req.language,
         format="wav",
     )
