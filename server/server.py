@@ -1309,6 +1309,8 @@ def _synthesize_stream(req: TTSRequest, client: str = "unspecified"):
                 n_done += 1
                 audio_sec += len(pcm) / 2 / sr
                 print(f"[stream] sentence {n_done}/{n_clauses} generated: {len(pcm) / 2 / sr:.1f}s audio, {time.time() - t_start:.1f}s elapsed", flush=True)
+                if n_done == n_clauses:
+                    _ticket_close(ticket)    # generation is over; don't show "generating" while the client drains the rest
                 if not pieces:
                     # sizes unknown up front, so 0xFFFFFFFF in both length fields
                     yield (b"RIFF" + (0xFFFFFFFF).to_bytes(4, "little") + b"WAVEfmt "
