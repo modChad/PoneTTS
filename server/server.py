@@ -896,6 +896,8 @@ def _client_app(request: Request) -> str:
         return tag
     if request.url.path in _ST_COMPAT_PATHS:
         return "sillytavern"
+    if "godotengine" in request.headers.get("user-agent", "").lower():
+        return "godot"           # a Godot game that sets no X-Client-App header
     return "unspecified"
 
 
@@ -2860,7 +2862,7 @@ def build_runner(preset: str, max_new_tokens: Optional[int] = None) -> None:
     cfg = OptimizedTTSConfig(
         decoder_runtime=decoder_runtime,
         torch_opt_mode=cfg_p["opt"],
-        compile_mode=cfg_p["compile"],
+        compile_mode=os.environ.get("MOSS_COMPILE_MODE") or cfg_p["compile"],   # e.g. "default" on a 2-core Colab, where max-autotune warm-up takes 25+ min
         tts_quantization=quant,
     )
     print(f"[server] vocoder={decoder_runtime} opt={cfg_p['opt']} quant={quant} "
