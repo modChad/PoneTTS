@@ -71,7 +71,19 @@ _default_audio_temperature = float(os.environ.get("MOSS_AUDIO_TEMPERATURE", "0.8
 # Preset hot-swap state (the web-page dropdown reloads the model in the background).
 _reload_lock = threading.Lock()
 _reload_state = {"busy": False, "target": None, "error": None}
-PRESET_FILE = Path(__file__).resolve().parent / "preset.conf"
+# Settings changed at runtime (web page / API) are saved here. Defaults to the
+# server folder; Docker sets MOSS_STATE_DIR to a bind-mounted folder so they
+# survive the container being recreated. Files shipped in the server folder
+# (voice_blend.json, pronunciation_cache.json) seed it on first start.
+_SERVER_DIR = Path(__file__).resolve().parent
+STATE_DIR = Path(os.environ.get("MOSS_STATE_DIR") or _SERVER_DIR).resolve()
+STATE_DIR.mkdir(parents=True, exist_ok=True)
+if STATE_DIR != _SERVER_DIR:
+    import shutil as _shutil
+    for _name in ("voice_blend.json", "voice_fx.json", "pronunciation_cache.json", "preset.conf"):
+        if not (STATE_DIR / _name).exists() and (_SERVER_DIR / _name).exists():
+            _shutil.copy2(_SERVER_DIR / _name, STATE_DIR / _name)
+PRESET_FILE = STATE_DIR / "preset.conf"
 
 
 def load_speakers() -> list[dict]:
@@ -456,7 +468,7 @@ def _auto_respell(text: str) -> tuple[str, dict[str, str]]:
 import difflib
 import json
 
-PRON_CACHE_FILE = PROJECT_DIR / "pronunciation_cache.json"
+PRON_CACHE_FILE = STATE_DIR / "pronunciation_cache.json"
 # OFF by user decision (2026-07-04): after the LoRA fine-tune, the model's raw
 # output is what plays — no hidden verification/retries/respellings. Manual
 # pronunciations.txt entries still apply. Set MOSS_FIX_PRON=1 to re-enable.
@@ -2409,8 +2421,6 @@ def openai_compat_generate(req: OpenAISpeechRequest, request: Request):
 # plain clickable link rather than needing blob/IndexedDB machinery.
 ST_CACHE_DIR = Path(__file__).resolve().parent / "st_cache"
 ST_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-app.mount("/st_cache", StaticFiles(directory=str(ST_CACHE_DIR)), name="st_cache")
-app.mount("/history/files", StaticFiles(directory=str(HISTORY_DIR)), name="history_files")
 
 
 @app.post("/cancel")
@@ -2541,6 +2551,13 @@ def st_cache_generate(req: STCacheGenerateRequest, request: Request):
         media_type="audio/wav",
         headers={"X-Cache-Path": cache_path},
     )
+
+
+# Static file mounts go AFTER every route that shares their prefix: Starlette
+# matches in registration order, and a Mount at /st_cache would otherwise
+# swallow POST /st_cache/generate and answer 405.
+app.mount("/st_cache", StaticFiles(directory=str(ST_CACHE_DIR)), name="st_cache")
+app.mount("/history/files", StaticFiles(directory=str(HISTORY_DIR)), name="history_files")
 
 
 # Stop buttons, live activity line and the History list for the web page.
@@ -2888,7 +2905,7 @@ def build_runner(preset: str, max_new_tokens: Optional[int] = None) -> None:
 # little of the fine-tune's pronunciation for more of the base model's prosody on
 # data-rich speakers (Dash, Twilight, ...).
 # ----------------------------------------------------------------------------
-VOICE_BLEND_FILE = PROJECT_DIR / "voice_blend.json"
+VOICE_BLEND_FILE = STATE_DIR / "voice_blend.json"
 _VOICE_PATCH_DIRS = [
     Path(os.environ.get("MOSS_VOICE_PATCH_DIR", "")),
     PROJECT_DIR / "voice_patch",
@@ -3154,7 +3171,7 @@ def voice_blend_set(req: BlendRequest):
 # processes one chunk at a time and carries what it needs (oscillator phase,
 # reverb tail) across chunk boundaries so sentence joins don't click.
 # ----------------------------------------------------------------------------
-VOICE_FX_FILE = PROJECT_DIR / "voice_fx.json"
+VOICE_FX_FILE = STATE_DIR / "voice_fx.json"
 FX_NAMES = {
     "robot": "Robot",
     "radio": "Radio",

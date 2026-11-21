@@ -37,6 +37,11 @@ if [ ! -f "$BUNDLE/portable_tts_runtime.py" ]; then
   exit 1
 fi
 
+# 4b) fix the downloaded bundle (missing feedback_lookup_tables parameter;
+# crashes on the first generation without it). Idempotent.
+echo "[setup] patching the torchopt bundle..."
+"$PY" patch_torchopt_bundle.py
+
 # 5) apply the v2.5 voice patch (pronunciation fine-tune, merged into the model once)
 echo "[setup] applying the v2.5 voice patch (a few minutes)..."
 "$PY" apply_voice_patch.py

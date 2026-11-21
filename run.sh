@@ -694,10 +694,12 @@ ${SFX_VOLUME_LINE}      - ./server/voice_patch:/app/voice_patch   # drop adapter
       - ./server/st_cache:/app/st_cache             # cache for the /st_cache/generate endpoint — visible/durable on the host
       - ./server/history:/app/history               # every generated line, playable from the web page (MOSS_HISTORY_MAX)
       - ./server/pronunciations.txt:/app/pronunciations.txt  # edited from the web page's Pronunciations button
+      - ./server/state:/app/state                   # web-page settings (voice effects, blends, preset) survive recreates
     environment:
       - MOSS_PERF_PRESET=${PRESET}
       - MOSS_SFX_ALLOW_NETWORK=${SFX_ALLOW_NETWORK}
       - PORT=${HOST_PORT}
+      - MOSS_STATE_DIR=/app/state
 
 volumes:
   pone-ttsmod_release:
@@ -746,10 +748,12 @@ ${SFX_VOLUME_LINE}      - ./server/voice_patch:/app/voice_patch   # drop adapter
       - ./server/st_cache:/app/st_cache             # cache for the /st_cache/generate endpoint — visible/durable on the host
       - ./server/history:/app/history               # every generated line, playable from the web page (MOSS_HISTORY_MAX)
       - ./server/pronunciations.txt:/app/pronunciations.txt  # edited from the web page's Pronunciations button
+      - ./server/state:/app/state                   # web-page settings (voice effects, blends, preset) survive recreates
     environment:
       - MOSS_PERF_PRESET=${PRESET}
       - MOSS_SFX_ALLOW_NETWORK=${SFX_ALLOW_NETWORK}
       - PORT=${HOST_PORT}
+      - MOSS_STATE_DIR=/app/state
       # - HSA_OVERRIDE_GFX_VERSION=11.0.2   # uncomment + adjust if needed, see note above
 
 volumes:
@@ -759,6 +763,8 @@ EOF
 fi
 
 echo "  Wrote $COMPOSE_FILE"
+# create the bind-mounted folders now so they're owned by you, not root
+mkdir -p server/state server/history server/st_cache
 
 if [[ ! -f "server/voice_patch/adapter_model.safetensors" ]]; then
     warn "server/voice_patch/adapter_model.safetensors is missing."

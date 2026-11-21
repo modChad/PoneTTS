@@ -47,8 +47,10 @@ if [ ! -f "$MARKER" ]; then
     echo "[entrypoint] first-run setup complete."
 fi
 
-if [ -n "${MOSS_PERF_PRESET:-}" ] && [ ! -f preset.conf ]; then
-    echo "${MOSS_PERF_PRESET}" > preset.conf
+STATE_DIR="${MOSS_STATE_DIR:-.}"
+mkdir -p "$STATE_DIR"
+if [ -n "${MOSS_PERF_PRESET:-}" ] && [ ! -f "$STATE_DIR/preset.conf" ]; then
+    echo "${MOSS_PERF_PRESET}" > "$STATE_DIR/preset.conf"
     echo "[entrypoint] performance preset set to: ${MOSS_PERF_PRESET}"
 fi
 

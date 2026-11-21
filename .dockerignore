@@ -6,4 +6,5 @@ server/*.pyc
 server/__pycache__/
 server/history/
 server/st_cache/
+server/state/
 .git/

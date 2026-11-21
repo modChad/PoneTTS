@@ -48,6 +48,7 @@ services:
       - ./server/st_cache:/app/st_cache        # cache for the /st_cache/generate endpoint — visible/durable on the host
       - ./server/history:/app/history          # every generated line, playable from the web page (MOSS_HISTORY_MAX)
       - ./server/pronunciations.txt:/app/pronunciations.txt  # edited from the web page's Pronunciations button; survives rebuilds
+      - ./server/state:/app/state              # web-page settings (voice effects, blends, preset) survive recreates
 
     # Every value below is the built-in default (server.py already has it), so
     # you only need to list the ones you change. Edit a value, then run
@@ -55,6 +56,7 @@ services:
     # no image rebuild needed. (Full descriptions: README.md > Configuration.)
     environment:
       - MOSS_PERF_PRESET=balanced   # quality | balanced | low_vram | potato
+      - MOSS_STATE_DIR=/app/state   # where web-page settings are saved (the mounted folder above)
       - MOSS_SFX_ALLOW_NETWORK=1    # 0 = /sfx serves only from its cache, never calls out to Freesound/BBC
       - MOSS_AUDIO_TEMPERATURE=0.85 # sampling temperature: lower = steadier, higher = more expressive
       - MOSS_HISTORY_MAX=500        # generated lines kept in the history; 0 = history off
@@ -128,10 +130,12 @@ networks:
 #       - ./server/voice_patch:/app/voice_patch
 #       - ./server/st_cache:/app/st_cache
 #       - ./server/history:/app/history
+#       - ./server/state:/app/state
 #
 #     environment:
 #       - HSA_OVERRIDE_GFX_VERSION=11.0.0
 #       - MOSS_PERF_PRESET=balanced
+#       - MOSS_STATE_DIR=/app/state
 #       # The other variables from Option A work here too; list only what you change.
 #       # - MOSS_SFX_ALLOW_NETWORK=0
 #
