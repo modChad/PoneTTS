@@ -146,6 +146,7 @@ Environment variables for the container:
 | `MOSS_AUDIO_TEMPERATURE` | `0.85` | Default sampling temperature. Lower is steadier, higher is more expressive |
 | `MOSS_SFX_ALLOW_NETWORK` | `1` | `0` makes `/sfx` serve only from its cache, with no outgoing requests |
 | `MOSS_FIX_STUCK_WORDS` | `1` | Detect and regenerate words that get stuck droning. Runs Whisper on every sentence; `0` is much faster |
+| `MOSS_STUCK_WHISPER_GATE` | `1.3` | Stuck-word check: Whisper only listens to sentences this many times longer than expected. Lower catches more, `0` listens to every sentence (slowest) |
 | `MOSS_LOOP_GUARD_REL_MULT` | `1.6` | A sentence this many times longer than expected (or one that hits its length limit) is checked with Whisper for repeats and failures |
 | `MOSS_LOOP_GUARD_MIN_HEARD` | `0.5` | If Whisper hears less than this share of a checked sentence's words, the sentence counts as failed and is regenerated |
 | `MOSS_FAILED_CLAUSE_RETRIES` | `2` | How many times a failed sentence is regenerated before it's sent as-is |

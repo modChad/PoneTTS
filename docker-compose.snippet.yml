@@ -56,7 +56,8 @@ services:
       - MOSS_PAUSE_SEC=0.35           # at an em-dash / ellipsis
 
       # Quality checks (stuck words, failed sentences)
-      - MOSS_FIX_STUCK_WORDS=1        # Whisper-check each sentence for stuck/droning words; 0 = much faster
+      - MOSS_FIX_STUCK_WORDS=1        # check sentences for stuck/droning words; 0 = faster
+      - MOSS_STUCK_WHISPER_GATE=1.3   # ...but Whisper only listens to sentences this many times longer than expected (0 = all)
       - MOSS_LOOP_GUARD_REL_MULT=1.6  # sentence this many times longer than expected gets a Whisper repeat check
       - MOSS_LOOP_GUARD_MIN_HEARD=0.5 # heard less than this share of the words = failed, regenerate
       - MOSS_FAILED_CLAUSE_RETRIES=2  # regenerations of a failed sentence before sending it as-is

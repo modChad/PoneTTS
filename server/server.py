@@ -1765,6 +1765,11 @@ def _expected_word_dur(word: str) -> float:
 # case that got through, and works even if Whisper itself is unavailable.
 STUCK_CLAUSE_REL_MULT = float(os.environ.get("MOSS_STUCK_CLAUSE_REL_MULT", "2.0"))
 STUCK_CLAUSE_BASE_SEC = 0.3  # fixed leading/trailing-pause allowance so short clauses don't false-positive on ordinary padding
+# Whisper only listens to a clause that already runs this many times longer
+# than expected; normal-length clauses skip it (the slow part of this check).
+# 0 = listen to every clause. A short drone inside a long sentence may not
+# lengthen it enough to pass the gate, so lower this if one slips through.
+STUCK_WHISPER_GATE = float(os.environ.get("MOSS_STUCK_WHISPER_GATE", "1.3"))
 
 
 def _expected_clause_dur(text: str) -> float:
@@ -1791,10 +1796,13 @@ def _find_stuck_word(wav_bytes: bytes, text: str, actual_dur: float) -> Optional
     rather than failing closed."""
     expected_total = _expected_clause_dur(text)
     clause_anomaly = actual_dur > expected_total * STUCK_CLAUSE_REL_MULT
+    if not clause_anomaly and actual_dur <= expected_total * STUCK_WHISPER_GATE:
+        return None   # normal length: nothing to listen for
 
     culprit_word = None
     try:
-        segs, _ = _get_whisper().transcribe(io.BytesIO(wav_bytes), beam_size=5,
+        # greedy decoding (beam 1): about twice as fast, and word timings are all this needs
+        segs, _ = _get_whisper().transcribe(io.BytesIO(wav_bytes), beam_size=1,
                                             word_timestamps=True)
         for s in segs:
             for w in (s.words or []):
