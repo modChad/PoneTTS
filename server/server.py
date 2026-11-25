@@ -562,8 +562,21 @@ _whisper_lock = threading.Lock()
 
 # Whisper is stored next to the model (release/whisper) so a Docker volume keeps it;
 # prepare.py downloads it during setup.
-WHISPER_MODEL = os.environ.get("MOSS_WHISPER_MODEL", "small.en")
+WHISPER_MODEL = os.environ.get("MOSS_WHISPER_MODEL", "base.en")
 WHISPER_DIR = RELEASE_DIR / "whisper"
+
+
+def _whisper_threads() -> int:
+    """CPU threads for Whisper: every core this process may use, minus 2 kept
+    free for everything else (at least 1). MOSS_WHISPER_THREADS overrides."""
+    env = os.environ.get("MOSS_WHISPER_THREADS", "").strip()
+    if env.isdigit() and int(env) > 0:
+        return int(env)
+    try:
+        cores = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        cores = os.cpu_count() or 1
+    return max(1, cores - 2)
 
 
 def _get_whisper():
@@ -573,9 +586,11 @@ def _get_whisper():
         if _whisper is None:
             from faster_whisper import WhisperModel
             t0 = time.time()
+            threads = _whisper_threads()
             _whisper = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8",
-                                    download_root=str(WHISPER_DIR))
-            print(f"[server] Whisper ({WHISPER_MODEL}) loaded in {time.time() - t0:.1f}s", flush=True)
+                                    cpu_threads=threads, download_root=str(WHISPER_DIR))
+            print(f"[server] Whisper ({WHISPER_MODEL}, {threads} CPU threads) loaded in "
+                  f"{time.time() - t0:.1f}s", flush=True)
     return _whisper
 
 

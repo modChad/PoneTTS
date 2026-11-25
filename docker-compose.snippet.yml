@@ -61,6 +61,7 @@ services:
       - MOSS_LOOP_GUARD_MIN_HEARD=0.5 # heard less than this share of the words = failed, regenerate
       - MOSS_FAILED_CLAUSE_RETRIES=2  # regenerations of a failed sentence before sending it as-is
       - MOSS_COMMA_SPLIT_MIN_WORDS=20 # sentences longer than this are also split at commas; 0 = never
+      - MOSS_WHISPER_MODEL=base.en    # Whisper for the checks: tiny.en (fastest) | base.en | small.en (most accurate)
 
       # Pronunciation helpers (both off by default; pronunciations.txt always applies)
       - MOSS_FIX_PRON=0               # verify rare words with Whisper and retry respellings (slower)

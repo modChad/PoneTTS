@@ -5,7 +5,7 @@ itself once it's done.
   1. download the model into release/ (~12 GB, first time only)
   2. apply the voice patch (downloads the adapter if needed; see apply_voice_patch.py)
   3. fix the downloaded torchopt bundle (see patch_torchopt_bundle.py)
-  4. download the Whisper model the speech checks use (~500 MB, first time only)
+  4. download the Whisper model the speech checks use (first time only)
 
 Used by entrypoint.sh (Docker), setup.sh / setup.bat (bare metal) and the Colab
 notebook, so they can't drift apart. Exit code is non-zero if a step failed.
@@ -20,7 +20,7 @@ RELEASE = HERE / "release"
 MARKER = RELEASE / ".setup_done"   # written once the model download has finished
 BUNDLE_RUNTIME = RELEASE / "moss_tts_torchopt_runner_bundle" / "portable_tts_runtime.py"
 WHISPER_DIR = RELEASE / "whisper"   # server.py loads it from here too
-WHISPER_MODEL = os.environ.get("MOSS_WHISPER_MODEL", "small.en")
+WHISPER_MODEL = os.environ.get("MOSS_WHISPER_MODEL", "base.en")
 
 
 def run(script: str) -> int:
@@ -34,7 +34,7 @@ def download_whisper() -> None:
     if marker.exists():
         print(f"[prepare] Whisper ({WHISPER_MODEL}) already downloaded.")
         return
-    print(f"[prepare] downloading Whisper ({WHISPER_MODEL}, ~500 MB, first time only)...", flush=True)
+    print(f"[prepare] downloading Whisper ({WHISPER_MODEL}, first time only)...", flush=True)
     try:
         from faster_whisper.utils import download_model
         download_model(WHISPER_MODEL, cache_dir=str(WHISPER_DIR))

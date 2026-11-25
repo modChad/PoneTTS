@@ -121,6 +121,8 @@ CHANGES IN THIS RELEASE
     release/whisper, so it survives container rebuilds, and loads during
     warm-up when stuck-word or pronunciation checks are on. The first
     request no longer waits for it (MOSS_WHISPER_MODEL)
+  - Whisper defaults to base.en (was small.en, about 3x slower) and uses
+    every CPU core but 2 (MOSS_WHISPER_THREADS)
   - Web page: if the reply to a long request is lost on the way back, the
     page waits for the line to appear in the history and plays it from
     there instead of showing a NetworkError
