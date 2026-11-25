@@ -162,6 +162,7 @@ Environment variables for the container:
 | `MOSS_DECODER_RUNTIME` | from preset | Override the vocoder: `onnx_cuda`, `onnx_cpu` or `onnx_hybrid` |
 | `MOSS_HISTORY_MAX` | `500` | How many generated lines to keep in the history (oldest deleted first). `0` turns history off |
 | `MOSS_VOICE_PATCH_URL` / `MOSS_VOICE_PATCH_SHA256` | built-in link / checksum | Where the voice patch is downloaded from on first start. `MOSS_VOICE_PATCH_URL=0` turns the download off |
+| `MOSS_ADMIN_KEY` | none | If set, saving on the web page's [Settings panel](#settings-panel) needs this key. `run.sh` can generate one or take yours |
 | `MOSS_DATA_DIR` | `server/data` | The [data folder](#data-folder). Docker uses `/app/data`, mounted from `./server/data` |
 | `HF_HUB_ENABLE_HF_TRANSFER` / `HF_HUB_DISABLE_XET` | `0` / `1` | The fast model downloaders are off by default; they got the container killed on test hardware |
 
@@ -182,6 +183,7 @@ All endpoints are on `http://<host>:8800`.
 | `POST` | `/tts` | Main synthesis endpoint (see below) |
 | `GET` | `/tts?text=...&speaker_id=31` | Quick test from a browser or curl |
 | `GET` | `/normalize?text=...` | Preview the cleaned-up text the model will actually read |
+| `GET` / `POST` | `/settings` | Live settings for the Settings panel (`POST /settings/reset` drops the changes). Saving needs `X-Admin-Key` if `MOSS_ADMIN_KEY` is set |
 | `GET` / `POST` | `/preset` | Show or switch the performance preset (`POST /preset?name=low_vram`) |
 | `GET` / `POST` | `/voice_blend` | Voice-patch blend settings |
 | `GET` | `/sfx?query=...` | Sound effect for a short description (Freesound / BBC, cached) |
@@ -293,6 +295,14 @@ Zecora = Zeh core ah
 
 **Voice patch:** `adapter_model.safetensors` is downloaded into `server/voice_patch/` on the first start (set `MOSS_VOICE_PATCH_URL=0` to skip it, or drop in your own copy). It improves pronunciation for low-screen-time characters (Maud, Zecora, Cheerilee, Celestia, ...). Without it the server runs on the base model.
 
+## Settings panel
+
+The web page's **Settings** button opens most of the [Configuration](#configuration) options: temperature, pauses, the stream buffer, the quality checks, respelling, history size and sound-effect downloads. Changes apply from the next line, with no restart. They're saved in `settings.json` in the [data folder](#data-folder) and win over the compose file's values. **Reset to start-up values** drops them.
+
+If `MOSS_ADMIN_KEY` is set, the panel asks for the key before saving. `run.sh` offers to generate a key, take your own, or keep the one already in `docker-compose.yml`. Only saving settings needs the key: speech requests from the game, SillyTavern and the page's Speak button never do.
+
+Scripts can use `GET /settings` and `POST /settings` with `{"values": {"MOSS_PAUSE_SEC": 0.3}}`, sending the key as an `X-Admin-Key` header.
+
 ## Data folder
 
 Everything the server writes, or you edit, lives in one folder: `server/data/` (Docker mounts it at `/app/data`).
@@ -300,7 +310,7 @@ Everything the server writes, or you edit, lives in one folder: `server/data/` (
 | In `server/data/` | What it is |
 |---|---|
 | `pronunciations.txt` | Your respellings (starts as a copy of `server/defaults/pronunciations.txt`) |
-| `preset.conf`, `voice_fx.json`, `voice_blend.json` | Settings changed from the web page |
+| `settings.json`, `preset.conf`, `voice_fx.json`, `voice_blend.json` | Settings changed from the web page |
 | `history/` | Saved generations |
 | `st_cache/` | Clips cached by `/st_cache/generate` |
 | `sfx_cache/` | Downloaded sound effects |

@@ -117,6 +117,12 @@ KNOWN ISSUES
 
 CHANGES IN THIS RELEASE
 -----------------------
+  - Settings panel on the web page: temperature, pauses, stream buffer,
+    quality checks, respelling, history size and sound-effect downloads,
+    applied from the next line with no restart and saved in settings.json.
+    Optional admin key (MOSS_ADMIN_KEY) for saving; run.sh generates one,
+    takes yours or keeps the existing one, and the Colab notebook
+    generates one and prints it with the link
   - Whisper (the speech checks' model) is downloaded during setup into
     release/whisper, so it survives container rebuilds, and loads during
     warm-up when stuck-word or pronunciation checks are on. The first

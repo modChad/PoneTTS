@@ -45,6 +45,7 @@ services:
     environment:
       - MOSS_PERF_PRESET=balanced   # quality | balanced | low_vram | potato
       - MOSS_DATA_DIR=/app/data     # the data folder (mounted above)
+      # - MOSS_ADMIN_KEY=change-me  # if set, the web page's Settings panel needs this key to save
       - MOSS_SFX_ALLOW_NETWORK=1    # 0 = /sfx serves only from its cache, never calls out to Freesound/BBC
       - MOSS_AUDIO_TEMPERATURE=0.85 # sampling temperature: lower = steadier, higher = more expressive
       - MOSS_HISTORY_MAX=500        # generated lines kept in the history; 0 = history off

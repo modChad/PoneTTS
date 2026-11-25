@@ -929,10 +929,10 @@ class TTSRequest(BaseModel):
     silence_max_gap_ms: int = 300      # longest internal pause to keep
     normalize: bool = True             # clean punctuation/symbols + apply respellings
     expand_numbers: bool = True        # 100 -> "one hundred" (only if normalize)
-    auto_respell: bool = AUTO_RESPELL_DEFAULT  # rare words -> phonetic respelling (only if normalize)
+    auto_respell: bool = Field(default_factory=lambda: AUTO_RESPELL_DEFAULT)  # (live setting) rare words -> phonetic respelling (only if normalize)
     client_pronunciations: dict[str, str] = Field(default_factory=dict)  # caller's own local pronunciations.txt overrides — see _apply_client_respellings
-    fix_pronunciation: bool = FIX_PRON_DEFAULT  # verify rare words via Whisper; solve + cache respellings
-    fix_stuck_words: bool = FIX_STUCK_WORDS_DEFAULT  # regenerate if a word's duration looks like a stuck-loop glitch
+    fix_pronunciation: bool = Field(default_factory=lambda: FIX_PRON_DEFAULT)  # (live setting) verify rare words via Whisper; solve + cache respellings
+    fix_stuck_words: bool = Field(default_factory=lambda: FIX_STUCK_WORDS_DEFAULT)  # (live setting) regenerate if a word's duration looks like a stuck-loop glitch
     style_emotion_id: Optional[int] = None   # 0-11; None => use [tag] in text, else Neutral
     style_energy: Optional[float] = None      # 0..1; None => use [tag] in text, else 0.5
     style_strength: Optional[float] = None    # emotion over-drive: 1.0 normal, >1 exaggerates (clamped 0..2.3; past ~2.3 the model destabilizes)
@@ -2673,6 +2673,90 @@ fxInit();
 </script>"""
 
 
+_SETTINGS_PAGE_JS = """<script>
+// Settings panel (GET/POST /settings). Changes apply from the next line.
+let setData=null;
+function setKeyGet(){ try{return sessionStorage.getItem('ponetts_admin_key')||'';}catch(e){return '';} }
+function setKeyPut(k){ try{sessionStorage.setItem('ponetts_admin_key',k);}catch(e){} }
+async function setToggle(){
+ const b=document.getElementById('setbox'); b.hidden=!b.hidden;
+ if(!b.hidden) await setLoad();
+}
+function setRender(){
+ const box=document.getElementById('setfields'); box.textContent='';
+ let group=null;
+ for(const s of setData.settings){
+  if(s.group!==group){
+   group=s.group; const h=document.createElement('div');
+   h.style.cssText='font-weight:600;margin:12px 0 2px'; h.textContent=group; box.appendChild(h);
+  }
+  const row=document.createElement('div'); row.className='row';
+  const lab=document.createElement('label'); lab.style.cssText='flex:1;font-weight:400';
+  lab.textContent=s.label; lab.htmlFor='set_'+s.name;
+  const inp=document.createElement('input'); inp.id='set_'+s.name;
+  if(s.type==='bool'){ inp.type='checkbox'; inp.checked=!!s.value; inp.style.cssText='width:auto;flex:0 0 auto;margin:6px'; }
+  else{ inp.type='number'; inp.min=s.min; inp.max=s.max; inp.step=s.step; inp.value=s.value;
+        inp.style.cssText='width:7em;flex:0 0 auto;font-size:16px;padding:4px;margin:2px 0'; }
+  row.append(lab,inp); box.appendChild(row);
+  const help=document.createElement('div'); help.style.cssText='font-size:12px;color:#666;margin:0 0 6px';
+  help.textContent=s.help+(s.changed?' (changed here; start-up value '+s.default+')':'');
+  box.appendChild(help);
+ }
+ document.getElementById('setkeyrow').hidden=!setData.key_required;
+ if(!document.getElementById('setkey').value) document.getElementById('setkey').value=setKeyGet();
+}
+async function setLoad(){
+ const st=document.getElementById('setst');
+ try{ setData=await (await fetch('/settings')).json(); }
+ catch(e){ st.textContent='could not load the settings: '+e; return; }
+ setRender();
+ st.textContent=setData.key_required?'Saving needs the admin key.':'';
+}
+function setValues(){
+ const v={};
+ for(const s of setData.settings){
+  const i=document.getElementById('set_'+s.name);
+  v[s.name]=(s.type==='bool')?i.checked:(i.value===''?s.value:Number(i.value));
+ }
+ return v;
+}
+async function setPost(url,body){
+ const k=document.getElementById('setkey').value.trim();
+ const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json','X-Admin-Key':k},
+                          body:JSON.stringify(body)});
+ if(r.ok&&k) setKeyPut(k);
+ return r;
+}
+async function setDone(r,msg){
+ const st=document.getElementById('setst');
+ if(r.status===401){ document.getElementById('setkeyrow').hidden=false;
+   st.textContent='Wrong or missing admin key.'; document.getElementById('setkey').focus(); return; }
+ if(r.status===400){ const j=await r.json(); const e=(j.detail&&j.detail.errors)||{};
+   st.textContent='Not saved: '+(Object.keys(e).map(n=>{const s=setData.settings.find(x=>x.name===n);
+     return (s?s.label:n)+' '+e[n];}).join('; ')||JSON.stringify(j.detail)); return; }
+ if(!r.ok){ st.textContent='error '+r.status; return; }
+ setData=await r.json(); setRender();
+ const t=setData.settings.find(x=>x.name==='MOSS_AUDIO_TEMPERATURE');
+ if(t) document.getElementById('temp').value=t.value;
+ st.textContent=msg;
+}
+async function setSave(){
+ document.getElementById('setst').textContent='saving...';
+ try{ await setDone(await setPost('/settings',{values:setValues()}),'Saved. Applies from the next line.'); }
+ catch(e){ document.getElementById('setst').textContent='error: '+e; }
+}
+let setResetArmed=0;
+async function setReset(){
+ const btn=document.getElementById('setresetbtn');
+ if(Date.now()-setResetArmed>4000){ setResetArmed=Date.now(); btn.textContent='Click again to reset';
+   setTimeout(()=>{btn.textContent='Reset to start-up values';},4000); return; }
+ setResetArmed=0; btn.textContent='Reset to start-up values';
+ try{ await setDone(await setPost('/settings/reset',{}),'Reset to the start-up values.'); }
+ catch(e){ document.getElementById('setst').textContent='error: '+e; }
+}
+</script>"""
+
+
 _PAGE_EXTRA_JS = """<script>
 const $ = id => document.getElementById(id);
 async function pronToggle(){
@@ -2814,7 +2898,8 @@ button.stop{{background:#fbe9e9;border:1px solid #d99}} button.small{{flex:0 0 a
 <button id=stopmine class=stop onclick="stopGen('mine')" hidden>Stop mine</button>
 <button id=stopall class=stop onclick="stopGen('all')" title="Cancel every client's generations (VN, SillyTavern, this page)">Stop all</button></div>
 <p id=st></p><div class=row style="align-items:center"><audio id=a controls style="flex:1"></audio>
-<button class=small onclick=pronToggle() title="Edit pronunciations.txt: the master respelling list, applied before every request">Pronunciations</button></div>
+<button class=small onclick=pronToggle() title="Edit pronunciations.txt: the master respelling list, applied before every request">Pronunciations</button>
+<button class=small onclick=setToggle() title="Pauses, streaming, quality checks and other server settings">Settings</button></div>
 <div class=box id=pronbox hidden><div class=row><strong style="flex:1">Pronunciations</strong>
 <span id=pronent style="font-size:14px;color:#555"></span></div>
 <div class=row><input id=pw placeholder="word" style="flex:1;font-size:16px;padding:6px">
@@ -2825,6 +2910,13 @@ button.stop{{background:#fbe9e9;border:1px solid #d99}} button.small{{flex:0 0 a
 <button class=small onclick="pronSave(true)">Save &amp; speak</button>
 <button class=small onclick=pronCheck() title="Show the text the model will actually receive">Check text</button></div>
 <p id=pronst style="font-size:14px;color:#555"></p></div>
+<div class=box id=setbox hidden><div class=row><strong style="flex:1">Settings</strong>
+<span style="font-size:13px;color:#555">apply from the next line, no restart</span></div>
+<div id=setfields></div>
+<div class=row id=setkeyrow hidden><input id=setkey type=password autocomplete=off placeholder="admin key" style="flex:1;font-size:16px;padding:6px"></div>
+<div class=row><button class=small onclick=setSave()>Save</button>
+<button class=small id=setresetbtn onclick=setReset()>Reset to start-up values</button></div>
+<p id=setst style="font-size:14px;color:#555"></p></div>
 <p id=act></p>
 <div class=box id=histbox><div class=row><strong style="flex:1">History</strong>
 <select id=hvoice onchange=loadHistory()><option value="">all voices</option></select>
@@ -2913,7 +3005,7 @@ async function go(){{
  finally{{genCtl=null;speakBtn.disabled=false;document.getElementById('stopmine').hidden=true;}}
 }}
 loadPresets();
-</script>""" + _PAGE_EXTRA_JS + _FX_PAGE_JS
+</script>""" + _PAGE_EXTRA_JS + _FX_PAGE_JS + _SETTINGS_PAGE_JS
 
 
 # ----------------------------------------------------------------------------
@@ -3523,6 +3615,190 @@ def voice_fx_set(req: FxRequest):
     return voice_fx_get()
 
 
+# ----------------------------------------------------------------------------
+# Live settings: the web page's Settings panel. Each one is a module value
+# above that's read on every request, so a change applies from the next
+# request with no restart. Changes are saved to settings.json in the data
+# folder and win over the environment; "reset" goes back to the values the
+# server started with. If MOSS_ADMIN_KEY is set, saving needs the key (sent as
+# the X-Admin-Key header). Reading the settings and generating speech never do.
+# ----------------------------------------------------------------------------
+import hmac
+
+SETTINGS_FILE = DATA_DIR / "settings.json"
+ADMIN_KEY = os.environ.get("MOSS_ADMIN_KEY", "").strip()
+
+# (env name, module variable, type, min, max, step, group, label, help)
+_SETTINGS = [
+    ("MOSS_AUDIO_TEMPERATURE", "_default_audio_temperature", float, 0.0, 2.0, 0.05, "Voice", "Temperature",
+     "Default sampling temperature for callers that don't send one. Lower is steadier, higher is more expressive."),
+    ("MOSS_SENTENCE_PAUSE_SEC", "SENTENCE_PAUSE_SEC", float, 0.0, 3.0, 0.01, "Pauses (seconds)", "Between sentences",
+     "Silence inserted between sentences. Lower is snappier."),
+    ("MOSS_COMMA_PAUSE_SEC", "COMMA_PAUSE_SEC", float, 0.0, 3.0, 0.01, "Pauses (seconds)", "At comma splits",
+     "Silence between the pieces of a long sentence split at commas."),
+    ("MOSS_PAUSE_SEC", "PAUSE_SEC", float, 0.0, 5.0, 0.05, "Pauses (seconds)", "At an em-dash or ellipsis",
+     "Silence for a deliberate pause (— or ...)."),
+    ("MOSS_COMMA_SPLIT_MIN_WORDS", "COMMA_SPLIT_MIN_WORDS", int, 0, 500, 1, "Pauses (seconds)", "Comma split length (words)",
+     "Sentences longer than this are also split at commas. 0 turns comma splitting off."),
+    ("MOSS_STREAM_BUFFER_SEC", "STREAM_BUFFER_SEC", float, 0.0, 600.0, 0.5, "Streaming", "Stream buffer (seconds)",
+     "Streaming only: seconds of audio generated before playback starts. 0 = off, large = wait for the whole line."),
+    ("MOSS_FIX_STUCK_WORDS", "FIX_STUCK_WORDS_DEFAULT", bool, 0, 1, 1, "Quality checks", "Fix stuck words",
+     "Regenerate sentences where a word gets stuck droning."),
+    ("MOSS_STUCK_WHISPER_GATE", "STUCK_WHISPER_GATE", float, 0.0, 5.0, 0.05, "Quality checks", "Whisper gate",
+     "Stuck-word check: Whisper only listens to sentences this many times longer than expected. Lower catches more; 0 listens to every sentence (slowest)."),
+    ("MOSS_LOOP_GUARD_REL_MULT", "LOOP_GUARD_REL_MULT", float, 1.0, 10.0, 0.05, "Quality checks", "Repeat check length",
+     "A sentence this many times longer than expected is checked with Whisper for repeats and failures."),
+    ("MOSS_LOOP_GUARD_MIN_HEARD", "LOOP_GUARD_MIN_HEARD", float, 0.0, 1.0, 0.05, "Quality checks", "Minimum words heard",
+     "If Whisper hears less than this share of a checked sentence's words, it counts as failed and is regenerated."),
+    ("MOSS_FAILED_CLAUSE_RETRIES", "FAILED_CLAUSE_RETRIES", int, 0, 10, 1, "Quality checks", "Failed sentence retries",
+     "How many times a failed sentence is regenerated before it's sent as-is."),
+    ("MOSS_FIX_PRON", "FIX_PRON_DEFAULT", bool, 0, 1, 1, "Pronunciation", "Check rare words",
+     "Check rare words with Whisper and fix their pronunciation (slower). pronunciations.txt always applies."),
+    ("MOSS_AUTO_RESPELL", "AUTO_RESPELL_DEFAULT", bool, 0, 1, 1, "Pronunciation", "Respell rare words",
+     "Respell rare words phonetically before speaking them."),
+    ("MOSS_HISTORY_MAX", "HISTORY_MAX", int, 0, 100000, 1, "Other", "History size",
+     "How many generated lines to keep (oldest deleted first). 0 turns history off."),
+    ("MOSS_SFX_ALLOW_NETWORK", "SFX_ALLOW_NETWORK", bool, 0, 1, 1, "Other", "Download sound effects",
+     "Let /sfx fetch sound effects from Freesound and the BBC archive. Off = serve only from the cache."),
+]
+_SETTINGS_BY_NAME = {s[0]: s for s in _SETTINGS}
+_settings_startup: dict = {}
+_settings_lock = threading.Lock()
+
+
+def _settings_coerce(spec: tuple, value):
+    typ, lo, hi = spec[2], spec[3], spec[4]
+    if typ is bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)) and value in (0, 1):
+            return bool(value)
+        if isinstance(value, str) and value.strip().lower() in ("1", "0", "true", "false", "on", "off"):
+            return value.strip().lower() in ("1", "true", "on")
+        raise ValueError("must be on or off")
+    if isinstance(value, bool):
+        raise ValueError("must be a number")
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        raise ValueError("must be a number") from None
+    if typ is int:
+        if num != int(num):
+            raise ValueError("must be a whole number")
+        num = int(num)
+    if not (lo <= num <= hi):   # also rejects NaN
+        raise ValueError(f"must be between {lo:g} and {hi:g}")
+    return num
+
+
+def _settings_overrides() -> dict:
+    try:
+        data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _settings_apply(values: dict) -> None:
+    g = globals()
+    for name, value in values.items():
+        g[_SETTINGS_BY_NAME[name][1]] = value
+
+
+def _settings_init() -> None:
+    """Remember the start-up values, then apply settings.json on top."""
+    g = globals()
+    _settings_startup.update({s[0]: g[s[1]] for s in _SETTINGS})
+    good = {}
+    for name, value in _settings_overrides().items():
+        spec = _SETTINGS_BY_NAME.get(name)
+        if spec is None:
+            continue
+        try:
+            good[name] = _settings_coerce(spec, value)
+        except ValueError as exc:
+            print(f"[settings] ignoring {name} in {SETTINGS_FILE.name}: {exc}", flush=True)
+    _settings_apply(good)
+    if good:
+        print("[settings] from the Settings page: " + ", ".join(f"{k}={v}" for k, v in good.items()), flush=True)
+    if ADMIN_KEY:
+        print("[settings] saving settings needs the admin key (MOSS_ADMIN_KEY)", flush=True)
+
+
+def _settings_view() -> dict:
+    g = globals()
+    overridden = _settings_overrides()
+    items = []
+    for name, var, typ, lo, hi, step, group, label, help_ in _SETTINGS:
+        items.append({
+            "name": name, "group": group, "label": label, "help": help_,
+            "type": "bool" if typ is bool else "int" if typ is int else "float",
+            "min": lo, "max": hi, "step": step,
+            "value": g[var], "default": _settings_startup.get(name), "changed": name in overridden,
+        })
+    return {"settings": items, "key_required": bool(ADMIN_KEY)}
+
+
+def _check_admin(request: Request) -> None:
+    if ADMIN_KEY and not hmac.compare_digest(request.headers.get("x-admin-key", "").encode(),
+                                             ADMIN_KEY.encode()):
+        raise HTTPException(status_code=401, detail="admin key required")
+
+
+@app.get("/settings")
+def settings_get():
+    """The live settings, for the web page's Settings panel."""
+    return _settings_view()
+
+
+@app.post("/settings")
+def settings_set(request: Request, payload: dict = Body(...)):
+    """Change live settings: {"values": {"MOSS_PAUSE_SEC": 0.3, ...}}. Applies
+    from the next request and is saved to settings.json. An empty "values"
+    just checks the admin key."""
+    _check_admin(request)
+    values = payload.get("values")
+    if not isinstance(values, dict):
+        raise HTTPException(status_code=400, detail="body must be {\"values\": {...}}")
+    clean, errors = {}, {}
+    for name, value in values.items():
+        spec = _SETTINGS_BY_NAME.get(name)
+        if spec is None:
+            errors[name] = "unknown setting"
+            continue
+        try:
+            clean[name] = _settings_coerce(spec, value)
+        except ValueError as exc:
+            errors[name] = str(exc)
+    if errors:
+        raise HTTPException(status_code=400, detail={"errors": errors})
+    with _settings_lock:
+        saved = _settings_overrides()
+        for name, value in clean.items():
+            if value == _settings_startup.get(name):
+                saved.pop(name, None)       # back to the start-up value: no override needed
+            else:
+                saved[name] = value
+        tmp = SETTINGS_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(saved, indent=1), encoding="utf-8")
+        tmp.replace(SETTINGS_FILE)
+        _settings_apply(clean)
+    if clean:
+        print("[settings] changed: " + ", ".join(f"{k}={v}" for k, v in clean.items()), flush=True)
+    return _settings_view()
+
+
+@app.post("/settings/reset")
+def settings_reset(request: Request):
+    """Drop every Settings-page change and go back to the start-up values."""
+    _check_admin(request)
+    with _settings_lock:
+        SETTINGS_FILE.unlink(missing_ok=True)
+        _settings_apply(dict(_settings_startup))
+    print("[settings] reset to the start-up values", flush=True)
+    return _settings_view()
+
+
 def _persisted_preset() -> Optional[str]:
     """Preset saved by the web-page dropdown, if any (survives restarts)."""
     try:
@@ -3583,6 +3859,7 @@ def main() -> None:
     if args.temperature is not None:
         global _default_audio_temperature
         _default_audio_temperature = args.temperature
+    _settings_init()   # the Settings page's saved changes win over env / CLI
 
     # build model BEFORE uvicorn binds the socket (the runtime may os.execv-restart
     # the process to set LD_LIBRARY_PATH; doing it first keeps that clean).

@@ -523,6 +523,50 @@ if [[ "$allow_sfx_net" =~ ^[Nn] ]]; then
 fi
 
 # -----------------------------------------------------------------------------
+# 4e. Admin key for the web page's Settings panel (optional). Only saving
+# settings needs it; speech requests (game, SillyTavern) never do.
+# -----------------------------------------------------------------------------
+OLD_ADMIN_KEY=""
+if [[ -f docker-compose.yml ]]; then
+    OLD_ADMIN_KEY="$(sed -n 's/^[[:space:]]*- MOSS_ADMIN_KEY=\([A-Za-z0-9._-]*\).*/\1/p' docker-compose.yml | head -n1)"
+fi
+gen_admin_key() { head -c 18 /dev/urandom | base64 | tr '+/' '-_'; }
+
+echo
+echo "  The web page's Settings panel can be protected with an admin key, so only you"
+echo "  can change settings. Speech requests (the game, SillyTavern) never need it."
+if [[ -n "$OLD_ADMIN_KEY" ]]; then
+    read -rp "  [K]eep the current key / [G]enerate a new one / [E]nter your own / [N]o key? [K]: " key_mode
+    key_mode="${key_mode:-K}"
+else
+    read -rp "  [G]enerate a key / [E]nter your own / [N]o key? [G]: " key_mode
+    key_mode="${key_mode:-G}"
+fi
+ADMIN_KEY=""
+case "$key_mode" in
+    [Kk]*) ADMIN_KEY="$OLD_ADMIN_KEY" ;;
+    [Gg]*) ADMIN_KEY="$(gen_admin_key)" ;;
+    [Ee]*)
+        while true; do
+            read -rsp "  Admin key (at least 8 letters, digits, dots, underscores or hyphens): " ADMIN_KEY; echo
+            [[ "$ADMIN_KEY" =~ ^[A-Za-z0-9._-]{8,}$ ]] && break
+            echo "  That key isn't valid. Use at least 8 letters, digits, dots, underscores or hyphens."
+        done
+        ;;
+    [Nn]*) ADMIN_KEY="" ;;
+    *) error "Not a valid choice."; exit 1 ;;
+esac
+
+ADMIN_KEY_LINE=""
+if [[ -n "$ADMIN_KEY" ]]; then
+    ADMIN_KEY_LINE="      - MOSS_ADMIN_KEY=${ADMIN_KEY}
+"
+    echo "  Admin key: ${BOLD}${ADMIN_KEY}${RESET}  (saved in docker-compose.yml; the Settings panel asks for it)"
+else
+    echo "  No admin key: anyone who can open the web page can change its settings."
+fi
+
+# -----------------------------------------------------------------------------
 # 4d. System RAM limit for the container. Without one, if the server runs the
 # machine out of RAM the kernel may kill your desktop session instead of the
 # server. With a limit, only the container gets killed (and restarted).
@@ -611,7 +655,7 @@ ${MEM_LIMIT_LINES}    deploy:
       - MOSS_SFX_ALLOW_NETWORK=${SFX_ALLOW_NETWORK}
       - PORT=${HOST_PORT}
       - MOSS_DATA_DIR=/app/data
-
+${ADMIN_KEY_LINE}
 volumes:
   pone-ttsmod_release:
 EOF
@@ -708,6 +752,10 @@ if [[ "$IS_WSL" -eq 1 ]]; then
     echo "         New-NetFirewallRule -DisplayName PoneTTS -Direction Inbound -Protocol TCP -LocalPort ${HOST_PORT} -Action Allow"
 fi
 
+if [[ -n "$ADMIN_KEY" ]]; then
+    echo
+    echo "  Settings panel admin key: ${BOLD}${ADMIN_KEY}${RESET}"
+fi
 echo
 info "Done. Following logs (Ctrl+C to stop watching — the container keeps running):"
 "${COMPOSE_CMD[@]}" logs -f
