@@ -20,10 +20,10 @@ To do it by hand:
 ```bat
 setup.bat            REM Windows (native, no WSL needed)
 ```
-Creates a venv, installs PyTorch (CUDA 12.8) + deps, downloads the model (~12 GB) from
-HuggingFace, and applies the hybrid-vocoder patch.
+Creates a venv, installs PyTorch (CUDA 12.8) + deps, then runs `prepare.py`: downloads the
+model (~12 GB) from HuggingFace, applies the voice patch and fixes the downloaded bundle.
 
-**Requires an NVIDIA GPU** (AMD works only through the Docker build, and that is highly experimental; see `../DISTRIBUTING.md`). The model's codec runs CUDA-only (there is no CPU build),
+**Requires an NVIDIA GPU.** The model's codec runs CUDA-only (there is no CPU build),
 so a discrete NVIDIA card is mandatory. ~6 GB VRAM minimum on the `potato` preset,
 ~8 GB on `low_vram`, ~16 GB for full quality (see presets below). Linux; Windows works
 under WSL2.
@@ -33,7 +33,7 @@ Pick a preset to trade speed/quality for VRAM:
 
 | preset | VRAM (approx) | notes |
 |--------|---------------|-------|
-| `quality` | ~14–16 GB | fastest; vocoder on GPU (NVIDIA only — on AMD it runs on the CPU, same as `balanced`) |
+| `quality` | ~14–16 GB | fastest; vocoder on GPU |
 | `balanced` **(default)** | ~9–12 GB | LM on GPU (fast), vocoder on CPU |
 | `low_vram` | ~7–8 GB | also drops CUDA-graph capture + shorter line cap |
 | `potato` | ~6 GB | same as `low_vram` with the shortest line cap (512 tokens). Not quantized — the model bundle has no int8 support. |
@@ -95,7 +95,7 @@ The server normalizes every line automatically (default on): **pauses and stops 
 preserved** (rewritten to commas/periods), screech-triggering symbols are cleaned, and
 numbers/symbols are expanded (`$5` → "five dollars", `50%` → "fifty percent").
 
-For specific words it mispronounces, edit **`pronunciations.txt`** (`word = respelling`,
+For specific words it mispronounces, edit **`data/pronunciations.txt`** (`word = respelling`,
 one per line). Spell the word how it should *sound* (`beg = behg`, `colonel = ker nel`).
 It **hot-reloads** — edit and the next request picks it up. Preview with:
 ```bash
@@ -131,9 +131,10 @@ cap, default 5). Each `/tts` reply includes an `X-Timing` header (`gen=`/`dec=`/
 - `server.py` — the HTTP server
 - `tts.py` — start/stop/status helper
 - `run_server.sh` — launcher (sets up the bundled CUDA libs)
-- `download_model.py` — fetches the model from HuggingFace (run by setup.sh)
-- `portable_tts_runtime.patched.py` — the modded runtime, overlaid onto the bundle by setup
-- `pronunciations.txt` — your pronunciation overrides
+- `prepare.py` — setup steps (model download, voice patch, bundle fix); run by setup and Docker
+- `download_model.py` — fetches the model from HuggingFace (run by prepare.py)
+- `defaults/` — the starting `pronunciations.txt` and `voice_blend.json`
+- `data/` — your settings, history, caches and `pronunciations.txt` (created on first start; `MOSS_DATA_DIR` moves it)
 - `release/`, `venv/` — created by setup (model weights + Python env; not shipped)
 
 Model: MOSS-TTS-PNY by ZDisket — https://huggingface.co/ZDisket/MOSS-TTS-PNY

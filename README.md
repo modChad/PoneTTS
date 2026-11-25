@@ -7,20 +7,20 @@ Self-hosted text-to-speech server for the **[MOSS-TTS-PNY](https://huggingface.c
 - Voice backend for **Pony Pony Paradise (PPP)** and **SillyTavern**
 - Browser test page, OpenAI-compatible and XTTSv2-compatible endpoints
 
-> **AMD (ROCm) support is highly experimental.** NVIDIA is the supported path. The AMD image has run on exactly one machine (an RX 7700S laptop), and it needed manual workarounds to get there. Expect problems on other AMD cards.
+Needs an **NVIDIA** GPU. No local GPU? Run it on Google Colab instead: see [Colab](#colab).
 
-[[_TOC_]]
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/modChad/PoneTTS/blob/main/colab/pone_tts_colab.ipynb)
 
 ## Requirements
 
-| | NVIDIA (supported) | AMD (experimental) |
-|---|---|---|
-| OS | Linux, or Windows 11/10 via WSL2 | Linux |
-| GPU memory | ~6 GB minimum, see [presets](#performance-presets) | ~8 GB tested |
-| Host driver | `nvidia-smi` lists your card | `rocm-smi` lists your card |
-| Extra | [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) | User in the `video` and `render` groups |
-| Docker | Engine, Compose plugin, buildx | Engine, Compose plugin, buildx |
-| Disk | ~12 GB for the model, plus the image | ~12 GB for the model, plus a larger image |
+| | |
+|---|---|
+| GPU | NVIDIA, ~6 GB VRAM minimum, see [presets](#performance-presets) |
+| OS | Linux, or Windows 11/10 via WSL2 |
+| Host driver | `nvidia-smi` lists your card |
+| Extra | [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) |
+| Docker | Engine, Compose plugin, buildx |
+| Disk | ~12 GB for the model, plus the image |
 
 The GPU driver must work **outside** Docker first. Docker only passes the GPU through; it can't fix a broken host driver.
 
@@ -72,7 +72,6 @@ Then open `http://localhost:8800/` for the test page.
 - **Memory:** the RAM limit is based on WSL's allowance. Raise it with `memory=<N>GB` under `[wsl2]` in `%UserProfile%\.wslconfig`, then `wsl --shutdown`.
 - **Start Docker at boot:** add `[boot]` / `systemd=true` to `/etc/wsl.conf`, then `wsl --shutdown`.
 - **Other devices on your LAN:** `localhost:8800` works from Windows. For other devices, either set `networkingMode=mirrored` under `[wsl2]` in `.wslconfig`, or run (admin PowerShell) `netsh interface portproxy add v4tov4 listenport=8800 listenaddress=0.0.0.0 connectport=8800 connectaddress=<WSL IP>` (get the IP with `hostname -I`; it changes on restart), plus an inbound firewall rule for the port.
-- **AMD** isn't supported under WSL2.
 
 ## Adding it to an existing Compose setup
 
@@ -84,7 +83,7 @@ services:
     build:
       context: /path/to/PoneTTS      # the folder, not a file inside it
       dockerfile: Dockerfile
-      target: runtime-cuda           # runtime-rocm for AMD (experimental)
+      target: runtime-cuda
     image: pone-ttsmod:cuda
     container_name: pone-ttsmod
     restart: unless-stopped
@@ -99,29 +98,26 @@ services:
       - "8800:8800"
     volumes:
       - pone-ttsmod_release:/app/release         # the model (~12 GB)
-      - pone-ttsmod_sfx_cache:/app/sfx_cache
-      - ./server/voice_patch:/app/voice_patch    # optional
-      - ./server/st_cache:/app/st_cache          # optional
-      - ./server/history:/app/history            # optional: keeps saved clips on the host
+      - ./server/voice_patch:/app/voice_patch    # the voice patch is downloaded here
+      - ./server/data:/app/data                  # settings, history, caches, pronunciations.txt
     environment:
       - MOSS_PERF_PRESET=balanced
+      - MOSS_DATA_DIR=/app/data
 
 volumes:
   pone-ttsmod_release:
-  pone-ttsmod_sfx_cache:
 ```
 
 - `context` must point at the PoneTTS **folder**. If it's missing, Docker builds from the wrong folder and fails with `"/server": not found`.
 - If you already built the image with `run.sh`, you can drop the `build:` block and keep `image: pone-ttsmod:cuda`.
 - Behind a VPN container (e.g. `network_mode: "service:gluetun"`), remove `ports:` and publish `8800` on the VPN container instead. The server uses port `8800` rather than `8000` so it doesn't clash with gluetun's control server.
 
-`docker-compose.snippet.yml` has full NVIDIA and AMD examples.
+`docker-compose.snippet.yml` has a full example with every setting.
 
 To build the image by hand:
 
 ```bash
-docker build --target runtime-cuda -t pone-ttsmod:cuda .   # NVIDIA
-docker build --target runtime-rocm -t pone-ttsmod:rocm .   # AMD (experimental)
+docker build --target runtime-cuda -t pone-ttsmod:cuda .
 ```
 
 ## Performance presets
@@ -130,14 +126,14 @@ Set with `MOSS_PERF_PRESET`, or switch live from the dropdown on the test page (
 
 | Preset | VRAM | Notes |
 |---|---|---|
-| `quality` | ~14–16 GB | Fastest. Vocoder on the GPU (NVIDIA only; on AMD it runs on the CPU, same as `balanced`) |
+| `quality` | ~14–16 GB | Fastest. Vocoder on the GPU |
 | `balanced` | ~9–12 GB | **Server default.** Model on the GPU, vocoder on the CPU |
 | `low_vram` | ~7–8 GB | Also skips CUDA-graph capture; shorter line cap |
 | `potato` | ~6 GB | As `low_vram` with the shortest line cap. Not quantized |
 
 The presets only trade speed and VRAM. Every preset uses the same voices and quality.
 
-`run.sh` suggests: under 7 GB `potato`, 7–9 GB `low_vram`, 9–12.5 GB `balanced`, above that `quality` (`balanced` on AMD).
+`run.sh` suggests: under 7 GB `potato`, 7–9 GB `low_vram`, 9–12.5 GB `balanced`, above that `quality`.
 
 ## Configuration
 
@@ -163,7 +159,7 @@ Environment variables for the container:
 | `MOSS_DECODER_RUNTIME` | from preset | Override the vocoder: `onnx_cuda`, `onnx_cpu` or `onnx_hybrid` |
 | `MOSS_HISTORY_MAX` | `500` | How many generated lines to keep in the history (oldest deleted first). `0` turns history off |
 | `MOSS_VOICE_PATCH_URL` / `MOSS_VOICE_PATCH_SHA256` | built-in link / checksum | Where the voice patch is downloaded from on first start. `MOSS_VOICE_PATCH_URL=0` turns the download off |
-| `HSA_OVERRIDE_GFX_VERSION` | `11.0.2` (AMD image) | AMD only: GPU architecture override. See [known issues](#known-issues) |
+| `MOSS_DATA_DIR` | `server/data` | The [data folder](#data-folder). Docker uses `/app/data`, mounted from `./server/data` |
 | `HF_HUB_ENABLE_HF_TRANSFER` / `HF_HUB_DISABLE_XET` | `0` / `1` | The fast model downloaders are off by default; they got the container killed on test hardware |
 
 ## API
@@ -232,13 +228,13 @@ The test page has **Stop mine** and **Stop all** buttons, and a live line showin
 
 ### History
 
-Every successfully generated line is saved to `server/history/` as a WAV plus a `.json` with its details (full text, voice, client, duration, temperature, preset). File names sort by time and are readable:
+Every successfully generated line is saved to `server/data/history/` as a WAV plus a `.json` with its details (full text, voice, client, duration, temperature, preset). File names sort by time and are readable:
 
 ```text
 20260930-200612-345_twilight_so-a-brilliant-mind-could-forge.wav
 ```
 
-The newest `MOSS_HISTORY_MAX` (default 500, roughly 500 MB) are kept. The test page lists them with play, download and delete, filterable by voice and client. Mount `./server/history` to keep them across container rebuilds.
+The newest `MOSS_HISTORY_MAX` (default 500, roughly 500 MB) are kept. The test page lists them with play, download and delete, filterable by voice and client. They live in the [data folder](#data-folder), so they survive container rebuilds.
 
 > Anyone who can reach the server can list and play the history, since there's no login.
 
@@ -273,7 +269,7 @@ Text before the first tag uses the request's `style_*` fields, or Neutral.
 
 ## Voice effects
 
-Each voice can have its own audio effect: `robot`, `radio`, `cavern`, `helium` or `changeling` (the original voice plus two extra tracks pitched -2 and -4 semitones). Choose it in the **Voice effect** box under the voice selector on the web page. The setting belongs to the voice, so it applies to every caller (web page, SillyTavern, Pony Pony Paradise). Settings are stored in `voice_fx.json` inside the container and reset if the container is recreated. Scripts can use `GET/POST /voice_fx`.
+Each voice can have its own audio effect: `robot`, `radio`, `cavern`, `helium` or `changeling` (the original voice plus two extra tracks pitched -2 and -4 semitones). Choose it in the **Voice effect** box under the voice selector on the web page. The setting belongs to the voice, so it applies to every caller (web page, SillyTavern, Pony Pony Paradise). Settings are stored in `voice_fx.json` in the [data folder](#data-folder), so they survive container rebuilds. Scripts can use `GET/POST /voice_fx`.
 
 ## Streaming
 
@@ -281,7 +277,7 @@ Each voice can have its own audio effect: `robot`, `radio`, `cavern`, `helium` o
 
 ## Pronunciation
 
-The model reads raw text with no phonetic dictionary, so some words come out wrong. Fix them in `server/pronunciations.txt`, one per line:
+The model reads raw text with no phonetic dictionary, so some words come out wrong. Fix them in `pronunciations.txt` in the [data folder](#data-folder) (`server/data/`), one per line, or with the web page's **Pronunciations** button:
 
 ```text
 beg = behg
@@ -294,28 +290,48 @@ Zecora = Zeh core ah
 
 **Voice patch:** `adapter_model.safetensors` is downloaded into `server/voice_patch/` on the first start (set `MOSS_VOICE_PATCH_URL=0` to skip it, or drop in your own copy). It improves pronunciation for low-screen-time characters (Maud, Zecora, Cheerilee, Celestia, ...). Without it the server runs on the base model.
 
+## Data folder
+
+Everything the server writes, or you edit, lives in one folder: `server/data/` (Docker mounts it at `/app/data`).
+
+| In `server/data/` | What it is |
+|---|---|
+| `pronunciations.txt` | Your respellings (starts as a copy of `server/defaults/pronunciations.txt`) |
+| `preset.conf`, `voice_fx.json`, `voice_blend.json` | Settings changed from the web page |
+| `history/` | Saved generations |
+| `st_cache/` | Clips cached by `/st_cache/generate` |
+| `sfx_cache/` | Downloaded sound effects |
+| `pronunciation_cache.json`, `freesound_key.txt` | Optional pronunciation-check cache, your Freesound API key |
+
+Older versions kept these in `server/`, `server/state/`, `server/history/` and `server/st_cache/`. The server (and `run.sh`) move them into `server/data/` on the first start. Re-run `./run.sh` once after updating, so the compose file mounts the new folder. Sound effects cached in the old `pone-ttsmod_sfx_cache` volume are downloaded again as needed; you can delete that volume with `docker volume rm pone-ttsmod_sfx_cache`.
+
+## Colab
+
+No NVIDIA GPU? `colab/pone_tts_colab.ipynb` runs the server on a free Google Colab GPU and gives you a public link for the game, SillyTavern or a browser. Click the **Open in Colab** badge at the top, then *Runtime → Run all*. The link stops working when the Colab session ends.
+
 ## Project layout
 
 ```text
 .
 ├── run.sh                      # Linux/WSL2 setup: prerequisites, GPU detection, compose file, build
-├── Dockerfile                  # Two build targets: runtime-cuda, runtime-rocm
-├── docker-compose.snippet.yml  # Example service blocks (NVIDIA and AMD)
+├── Dockerfile                  # The NVIDIA image (target: runtime-cuda)
+├── docker-compose.snippet.yml  # Example service block with every setting
+├── colab/                      # Google Colab notebook
 ├── DISTRIBUTING.md             # Build notes for other machines
 ├── VERSION.txt                 # Release notes and known issues
 └── server/
     ├── server.py               # The HTTP server (FastAPI)
-    ├── entrypoint.sh           # Container start: download, patches, GPU check, launch
+    ├── entrypoint.sh           # Container start: prepare.py, GPU check, launch
+    ├── prepare.py              # Setup steps shared by Docker, setup.sh/.bat and Colab
     ├── download_model.py       # Fetches the model from HuggingFace
-    ├── apply_voice_patch.py    # Merges the optional voice patch
+    ├── apply_voice_patch.py    # Downloads and merges the voice patch
     ├── patch_torchopt_bundle.py# Fixes a bug in the downloaded model runtime
-    ├── pronunciations.txt      # Your respellings
-    ├── voice_patch/            # Optional pronunciation LoRA
-    ├── history/                # Saved generations (created at runtime)
-    └── sfx_cache/              # Cached sound effects
+    ├── defaults/               # Starting pronunciations.txt and voice_blend.json
+    ├── voice_patch/            # Pronunciation LoRA (downloaded on first start)
+    └── data/                   # Your settings, history and caches (created at runtime)
 ```
 
-`server/setup.sh`, `run_server.sh` and `tts.py` are the original bare-metal (non-Docker) launchers. See `server/README.md` for how to use them.
+`server/setup.sh`, `server/run_server.sh` and `server/tts.py` are the original bare-metal (non-Docker) launchers. See `server/README.md` for how to use them.
 
 ## Troubleshooting
 
@@ -326,7 +342,7 @@ Zecora = Zeh core ah
 | `failed to get console: provided file is not a console` | Older `run.sh` piped to `tee`. Current `run.sh` handles this; by hand, set `COMPOSE_PROGRESS=plain` |
 | `fork/exec /usr/bin/docker-proxy: no such file or directory` | Reinstall Docker and restart the service, or set `{"userland-proxy": false}` in `/etc/docker/daemon.json` |
 | Container restarts during the model download | Usually memory. Check `docker compose logs`: the entrypoint prints the exit code and free disk space |
-| `torch.cuda.is_available() is False` | GPU not passed through: check the NVIDIA Container Toolkit (NVIDIA), or the `/dev/kfd` and `/dev/dri` devices (AMD) |
+| `torch.cuda.is_available() is False` | GPU not passed through: check the NVIDIA Container Toolkit |
 | `[voice-patch] could not download the voice patch` | No network, or the download link is down. The server still runs on the base model. Put `adapter_model.safetensors` into `server/voice_patch/` and restart |
 | `$'\r': command not found` (WSL) | CRLF line endings. `sed -i 's/\r$//' run.sh server/*.sh`; the repo's `.gitattributes` forces LF on new clones |
 | `could not select device driver "nvidia"` (WSL) | NVIDIA Container Toolkit missing or Docker not restarted: re-run `./run.sh`, or `sudo nvidia-ctk runtime configure --runtime=docker && sudo service docker restart` |
@@ -335,8 +351,6 @@ Zecora = Zeh core ah
 
 ## Known issues
 
-- **AMD is highly experimental** (see the note at the top).
-- The AMD image sets `HSA_OVERRIDE_GFX_VERSION=11.0.2` (RX 7700S) for every AMD card. Other cards may need a different value or none at all.
 - The NVIDIA image hasn't yet been confirmed running on real hardware.
 
 ## Credits
@@ -353,5 +367,5 @@ In short: you can use, copy, modify and share it freely for any **noncommercial*
 Not covered by this licence:
 
 - **The MOSS-TTS-PNY model.** It's downloaded from HuggingFace at first start, not included here, and has its own terms. See the [model card](https://huggingface.co/ZDisket/MOSS-TTS-PNY).
-- **Sound effects in `server/sfx_cache/`.** These come from Freesound and the BBC Sound Effects archive and stay under their original licences.
+- **Sound effects in `server/data/sfx_cache/`.** These come from Freesound and the BBC Sound Effects archive and stay under their original licences.
 - **Characters and voices.** My Little Pony and Team Fortress 2 characters belong to their respective owners.

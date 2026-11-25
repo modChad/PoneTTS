@@ -1,13 +1,10 @@
 # Before you build this
 
-> **AMD (ROCm) support is highly experimental.** NVIDIA is the supported
-> path. The AMD image has only been run on one machine (an RX 7700S laptop),
-> and it needed manual workarounds to get there. Expect problems on other
-> AMD cards.
+PoneTTS needs an NVIDIA GPU.
 
 ## The easy way (Linux, or Windows via WSL2)
-Run `./run.sh` (inside Ubuntu on WSL2 if you're on Windows). It checks Docker/buildx are working, detects your GPU
-vendor and VRAM, picks a matching performance preset, generates a
+Run `./run.sh` (inside Ubuntu on WSL2 if you're on Windows). It checks Docker/buildx are working, detects your GPU's
+VRAM, picks a matching performance preset, generates a
 `docker-compose.yml` for your hardware, and (with your confirmation) builds
 and starts it. Re-running it is safe — an existing `docker-compose.yml` gets
 backed up, not overwritten.
@@ -21,23 +18,20 @@ Docker does not provide a GPU driver — it only passes through to whatever's
 already installed and working on the host. Confirm this in a plain terminal
 (no container) before touching this project at all:
 
-- **NVIDIA:** `nvidia-smi` should print your GPU and driver version. Under WSL2 the driver is installed on Windows; never install a Linux driver inside WSL.
-- **AMD:** `rocm-smi` should print your GPU.
+`nvidia-smi` should print your GPU and driver version. Under WSL2 the driver is installed on Windows; never install a Linux driver inside WSL.
 
-If neither works, install/fix the host driver first — nothing here can fix
+If it doesn't, install/fix the host driver first — nothing here can fix
 that for you, and the container will fail in confusing ways if you skip this.
 
-## 2. Pick your build target
-This Dockerfile has two independent targets — you build exactly one, matching
-your actual GPU vendor:
+## 2. Build the image
 
 ```
-docker build --target runtime-cuda -t pone-ttsmod:cuda .   # NVIDIA
-docker build --target runtime-rocm -t pone-ttsmod:rocm .   # AMD (highly experimental)
+docker build --target runtime-cuda -t pone-ttsmod:cuda .
 ```
 
-In `docker-compose.snippet.yml`, use Option A (NVIDIA) or Option B (AMD) —
-whichever matches. Don't mix; there's no auto-detection by design.
+Or merge the service block from `docker-compose.snippet.yml` into your own
+compose file. Mount `./server/data` (your settings, history and caches) and
+`./server/voice_patch` as shown there.
 
 ## 3. Pick a performance preset for YOUR card's VRAM
 Set `MOSS_PERF_PRESET` in the compose file's `environment:` block:

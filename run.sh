@@ -2,13 +2,13 @@
 # PoneTTS setup - Linux & Windows.
 #
 # Runs on native Linux, and on Windows via WSL2 (run it inside your WSL
-# distro, e.g. Ubuntu 22.04). Detects your GPU vendor (NVIDIA/AMD) and VRAM, generates a docker-compose.yml
-# tailored to your hardware (right build target, right device-passthrough
-# flags, right performance preset), and optionally builds + starts it.
+# distro, e.g. Ubuntu 22.04). Detects your NVIDIA GPU and its VRAM, generates a
+# docker-compose.yml with the right performance preset, and optionally builds +
+# starts it.
 #
-# Offers to install missing Docker pieces and (NVIDIA) the NVIDIA Container
-# Toolkit. It does NOT install GPU drivers or ROCm: confirm your GPU driver
-# works OUTSIDE Docker first (nvidia-smi / rocm-smi). Under WSL2 the NVIDIA
+# Offers to install missing Docker pieces and the NVIDIA Container Toolkit.
+# It does NOT install GPU drivers: confirm your GPU driver works OUTSIDE
+# Docker first (nvidia-smi). Under WSL2 the NVIDIA
 # driver lives on the Windows side - never install a Linux driver in WSL.
 # See DISTRIBUTING.md.
 set -euo pipefail
@@ -282,7 +282,7 @@ fi
 echo "  Docker + Compose ($COMPOSE) + buildx OK."
 
 # -----------------------------------------------------------------------------
-# 3. GPU vendor + VRAM detection
+# 3. GPU + VRAM detection
 # -----------------------------------------------------------------------------
 info "Detecting GPU..."
 
@@ -294,8 +294,6 @@ fi
 
 NVIDIA_OK=0
 NVIDIA_VRAM_MB=0
-AMD_OK=0
-AMD_VRAM_MB=0
 
 if command -v nvidia-smi >/dev/null 2>&1; then
     # First GPU only — multi-GPU setups should edit the generated compose file.
@@ -309,186 +307,110 @@ if command -v nvidia-smi >/dev/null 2>&1; then
     fi
 fi
 
-if command -v rocm-smi >/dev/null 2>&1; then
-    # rocm-smi's output format has genuinely changed across versions. Try
-    # --json first (most reliable when supported); fall back to text parsing.
-    json_out="$(rocm-smi --showmeminfo vram --json 2>/dev/null || true)"
-    if [[ -n "$json_out" ]] && command -v python3 >/dev/null 2>&1; then
-        tmpfile="$(mktemp)"
-        printf '%s' "$json_out" > "$tmpfile"
-        AMD_VRAM_MB="$(python3 - "$tmpfile" <<'PYEOF'
-import json, sys
-try:
-    with open(sys.argv[1]) as f:
-        data = json.load(f)
-    for card in data.values():
-        for k, v in card.items():
-            if "VRAM Total Memory" in k or "vram_total" in k.lower():
-                # value may be bytes as a string
-                print(int(str(v).strip()) // (1024 * 1024))
-                sys.exit(0)
-except Exception:
-    pass
-print(0)
-PYEOF
-)"
-        rm -f "$tmpfile"
-    fi
-    if [[ "${AMD_VRAM_MB:-0}" -eq 0 ]]; then
-        # Text fallback: look for a "VRAM Total Memory (B): <bytes>" style line
-        # specifically — NOT just "the last number in the output", since a
-        # "VRAM Total Used Memory" line can appear after it and would
-        # otherwise get picked up instead, silently under-reporting VRAM.
-        text_out="$(rocm-smi --showmeminfo vram 2>/dev/null || true)"
-        bytes_val="$(echo "$text_out" | grep -i "VRAM Total Memory" | grep -oE '[0-9]+' | tail -n1 || true)"
-        if [[ -n "$bytes_val" && "$bytes_val" =~ ^[0-9]+$ && "$bytes_val" -gt 1048576 ]]; then
-            AMD_VRAM_MB=$(( bytes_val / 1024 / 1024 ))
-        fi
-    fi
-
-    if command -v rocminfo >/dev/null 2>&1 || rocm-smi --showproductname >/dev/null 2>&1; then
-        AMD_OK=1
-        if [[ "${AMD_VRAM_MB:-0}" -gt 0 ]]; then
-            echo "  AMD GPU detected (${AMD_VRAM_MB} MiB VRAM)"
-        else
-            warn "AMD GPU detected via rocm-smi, but couldn't parse VRAM size from its output"
-            warn "(this varies across ROCm versions). Defaulting to the safe low_vram preset."
-        fi
-    fi
-fi
-
-if [[ "$NVIDIA_OK" -eq 0 && "$AMD_OK" -eq 0 ]]; then
-    error "No working GPU detected — neither nvidia-smi nor rocm-smi returned usable output."
+if [[ "$NVIDIA_OK" -eq 0 ]]; then
+    error "No working NVIDIA GPU detected — nvidia-smi didn't return usable output."
     if [[ "$IS_WSL" -eq 1 ]]; then
         error "Under WSL2 the GPU driver is installed on WINDOWS, not in this distro:"
         error "  1. Install/update the NVIDIA driver on Windows (a WSL-capable one, 470+)."
         error "  2. Do NOT install a Linux NVIDIA driver inside WSL - it breaks GPU passthrough."
         error "  3. Run 'wsl --update' then 'wsl --shutdown' in PowerShell, reopen WSL, and check"
         error "     that 'nvidia-smi' prints your GPU here."
-        error "(AMD GPUs aren't supported under WSL2 by this project.)"
     else
-        error "Confirm your GPU driver works OUTSIDE Docker first: run 'nvidia-smi' or 'rocm-smi'"
-        error "directly in this terminal. If neither prints your GPU, fix that before re-running."
+        error "Confirm your GPU driver works OUTSIDE Docker first: run 'nvidia-smi' directly"
+        error "in this terminal. If it doesn't print your GPU, fix that before re-running."
     fi
     exit 1
 fi
 
-VENDOR=""
-VRAM_MB=0
-
-if [[ "$NVIDIA_OK" -eq 1 && "$AMD_OK" -eq 1 ]]; then
-    warn "Both an NVIDIA and an AMD GPU look usable on this system."
-    echo "  1) NVIDIA"
-    echo "  2) AMD"
-    read -rp "  Which one should PoneTTS use? [1/2]: " choice
-    case "$choice" in
-        1) VENDOR=nvidia; VRAM_MB="$NVIDIA_VRAM_MB" ;;
-        2) VENDOR=amd; VRAM_MB="$AMD_VRAM_MB" ;;
-        *) error "Not a valid choice."; exit 1 ;;
-    esac
-elif [[ "$NVIDIA_OK" -eq 1 ]]; then
-    VENDOR=nvidia
-    VRAM_MB="$NVIDIA_VRAM_MB"
-else
-    VENDOR=amd
-    VRAM_MB="$AMD_VRAM_MB"
-fi
-
-if [[ "$VENDOR" == nvidia ]]; then
-    IMAGE_TAG="pone-ttsmod:cuda"
-    BUILD_TARGET="runtime-cuda"
-else
-    IMAGE_TAG="pone-ttsmod:rocm"
-    BUILD_TARGET="runtime-rocm"
-fi
+VRAM_MB="$NVIDIA_VRAM_MB"
+IMAGE_TAG="pone-ttsmod:cuda"
+BUILD_TARGET="runtime-cuda"
 
 # -----------------------------------------------------------------------------
 # 3b. NVIDIA Container Toolkit — without it Docker can't hand the GPU to the
 # container, even though nvidia-smi works fine on the host.
 # -----------------------------------------------------------------------------
-if [[ "$VENDOR" == nvidia ]]; then
-    if command -v nvidia-container-runtime-hook >/dev/null 2>&1 \
-        || command -v nvidia-ctk >/dev/null 2>&1; then
-        echo "  NVIDIA Container Toolkit OK."
-    else
-        warn "NVIDIA Container Toolkit not found — Docker can't pass your GPU to the container without it."
-        TK_CMD=()
-        if [[ "$IS_WSL" -eq 1 ]] && command -v apt-get >/dev/null 2>&1; then
-            # WSL (Debian/Ubuntu): add NVIDIA's apt repo, then install a pinned version.
-            NVIDIA_CONTAINER_TOOLKIT_VERSION="${NVIDIA_CONTAINER_TOOLKIT_VERSION:-1.20.1-1}"
-            KEYRING=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
-            LIST=/etc/apt/sources.list.d/nvidia-container-toolkit.list
-            echo "  This will:"
-            echo "    - install ca-certificates, curl, gnupg2"
-            echo "    - add NVIDIA's apt repo (key: $KEYRING, list: $LIST)"
-            echo "    - install nvidia-container-toolkit ${NVIDIA_CONTAINER_TOOLKIT_VERSION} (+ base, tools, libnvidia-container1)"
-            echo "    - register the NVIDIA runtime with Docker and restart Docker"
-            read -rp "  Install it now? [Y/n]: " do_tk
-            do_tk="${do_tk:-Y}"
-            if [[ ! "$do_tk" =~ ^[Yy] ]]; then
-                error "The NVIDIA Container Toolkit is required — install it, then re-run this script."
-                exit 1
-            fi
-            install_tk_wsl() {
-                sudo apt-get update && sudo apt-get install -y --no-install-recommends \
-                    ca-certificates curl gnupg2 || return 1
-                curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
-                    | sudo gpg --dearmor --yes -o "$KEYRING" || return 1
-                curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
-                    | sed "s#deb https://#deb [signed-by=$KEYRING] https://#g" \
-                    | sudo tee "$LIST" >/dev/null || return 1
-                sudo apt-get update || return 1
-                local v="$NVIDIA_CONTAINER_TOOLKIT_VERSION"
-                sudo apt-get install -y \
-                    "nvidia-container-toolkit=${v}" \
-                    "nvidia-container-toolkit-base=${v}" \
-                    "libnvidia-container-tools=${v}" \
-                    "libnvidia-container1=${v}"
-            }
-            if ! install_tk_wsl; then
-                error "Toolkit install failed — see the output above."
-                exit 1
-            fi
-            if command -v nvidia-ctk >/dev/null 2>&1; then
-                sudo nvidia-ctk runtime configure --runtime=docker \
-                    || warn "Couldn't register the NVIDIA runtime with Docker (nvidia-ctk runtime configure)."
-            fi
-            restart_docker_service || warn "Couldn't restart Docker — restart it yourself ('sudo service docker restart')."
-            echo "  NVIDIA Container Toolkit installed."
-            TK_DONE=1
-        elif command -v pacman >/dev/null 2>&1; then
-            TK_CMD=(sudo pacman -S --needed --noconfirm nvidia-container-toolkit)
-        elif command -v apt-get >/dev/null 2>&1 && apt-cache show nvidia-container-toolkit >/dev/null 2>&1; then
-            TK_CMD=(sudo apt-get install -y nvidia-container-toolkit)
-        elif command -v dnf >/dev/null 2>&1 && dnf -q list nvidia-container-toolkit >/dev/null 2>&1; then
-            TK_CMD=(sudo dnf install -y nvidia-container-toolkit)
-        elif command -v zypper >/dev/null 2>&1 && zypper -q info nvidia-container-toolkit 2>/dev/null | grep -q '^Name'; then
-            TK_CMD=(sudo zypper --non-interactive install nvidia-container-toolkit)
-        fi
-
-        if [[ "${TK_DONE:-0}" -ne 1 ]]; then
-        if [[ "${#TK_CMD[@]}" -eq 0 ]]; then
-            error "It isn't in your configured package repos. Add NVIDIA's repo and install it:"
-            error "  https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html"
-            error "then re-run this script."
-            exit 1
-        fi
-
-        echo "  This will run: ${TK_CMD[*]}"
-        echo "  and then restart Docker so it picks the toolkit up."
+if command -v nvidia-container-runtime-hook >/dev/null 2>&1 \
+    || command -v nvidia-ctk >/dev/null 2>&1; then
+    echo "  NVIDIA Container Toolkit OK."
+else
+    warn "NVIDIA Container Toolkit not found — Docker can't pass your GPU to the container without it."
+    TK_CMD=()
+    if [[ "$IS_WSL" -eq 1 ]] && command -v apt-get >/dev/null 2>&1; then
+        # WSL (Debian/Ubuntu): add NVIDIA's apt repo, then install a pinned version.
+        NVIDIA_CONTAINER_TOOLKIT_VERSION="${NVIDIA_CONTAINER_TOOLKIT_VERSION:-1.20.1-1}"
+        KEYRING=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+        LIST=/etc/apt/sources.list.d/nvidia-container-toolkit.list
+        echo "  This will:"
+        echo "    - install ca-certificates, curl, gnupg2"
+        echo "    - add NVIDIA's apt repo (key: $KEYRING, list: $LIST)"
+        echo "    - install nvidia-container-toolkit ${NVIDIA_CONTAINER_TOOLKIT_VERSION} (+ base, tools, libnvidia-container1)"
+        echo "    - register the NVIDIA runtime with Docker and restart Docker"
         read -rp "  Install it now? [Y/n]: " do_tk
         do_tk="${do_tk:-Y}"
         if [[ ! "$do_tk" =~ ^[Yy] ]]; then
             error "The NVIDIA Container Toolkit is required — install it, then re-run this script."
             exit 1
         fi
-        if ! "${TK_CMD[@]}"; then
+        install_tk_wsl() {
+            sudo apt-get update && sudo apt-get install -y --no-install-recommends \
+                ca-certificates curl gnupg2 || return 1
+            curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
+                | sudo gpg --dearmor --yes -o "$KEYRING" || return 1
+            curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+                | sed "s#deb https://#deb [signed-by=$KEYRING] https://#g" \
+                | sudo tee "$LIST" >/dev/null || return 1
+            sudo apt-get update || return 1
+            local v="$NVIDIA_CONTAINER_TOOLKIT_VERSION"
+            sudo apt-get install -y \
+                "nvidia-container-toolkit=${v}" \
+                "nvidia-container-toolkit-base=${v}" \
+                "libnvidia-container-tools=${v}" \
+                "libnvidia-container1=${v}"
+        }
+        if ! install_tk_wsl; then
             error "Toolkit install failed — see the output above."
             exit 1
         fi
-        restart_docker_service || warn "Couldn't restart Docker — restart it yourself before continuing."
-        echo "  NVIDIA Container Toolkit installed."
+        if command -v nvidia-ctk >/dev/null 2>&1; then
+            sudo nvidia-ctk runtime configure --runtime=docker \
+                || warn "Couldn't register the NVIDIA runtime with Docker (nvidia-ctk runtime configure)."
         fi
+        restart_docker_service || warn "Couldn't restart Docker — restart it yourself ('sudo service docker restart')."
+        echo "  NVIDIA Container Toolkit installed."
+        TK_DONE=1
+    elif command -v pacman >/dev/null 2>&1; then
+        TK_CMD=(sudo pacman -S --needed --noconfirm nvidia-container-toolkit)
+    elif command -v apt-get >/dev/null 2>&1 && apt-cache show nvidia-container-toolkit >/dev/null 2>&1; then
+        TK_CMD=(sudo apt-get install -y nvidia-container-toolkit)
+    elif command -v dnf >/dev/null 2>&1 && dnf -q list nvidia-container-toolkit >/dev/null 2>&1; then
+        TK_CMD=(sudo dnf install -y nvidia-container-toolkit)
+    elif command -v zypper >/dev/null 2>&1 && zypper -q info nvidia-container-toolkit 2>/dev/null | grep -q '^Name'; then
+        TK_CMD=(sudo zypper --non-interactive install nvidia-container-toolkit)
+    fi
+
+    if [[ "${TK_DONE:-0}" -ne 1 ]]; then
+    if [[ "${#TK_CMD[@]}" -eq 0 ]]; then
+        error "It isn't in your configured package repos. Add NVIDIA's repo and install it:"
+        error "  https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html"
+        error "then re-run this script."
+        exit 1
+    fi
+
+    echo "  This will run: ${TK_CMD[*]}"
+    echo "  and then restart Docker so it picks the toolkit up."
+    read -rp "  Install it now? [Y/n]: " do_tk
+    do_tk="${do_tk:-Y}"
+    if [[ ! "$do_tk" =~ ^[Yy] ]]; then
+        error "The NVIDIA Container Toolkit is required — install it, then re-run this script."
+        exit 1
+    fi
+    if ! "${TK_CMD[@]}"; then
+        error "Toolkit install failed — see the output above."
+        exit 1
+    fi
+    restart_docker_service || warn "Couldn't restart Docker — restart it yourself before continuing."
+    echo "  NVIDIA Container Toolkit installed."
     fi
 fi
 
@@ -500,7 +422,7 @@ fi
 VRAM_GB=$(( (VRAM_MB + 512) / 1024 ))
 
 if [[ "$VRAM_MB" -eq 0 ]]; then
-    # Detection failed to produce a number at all (AMD text-parsing miss, etc.)
+    # Detection failed to produce a number at all
     # — default to the safest tier rather than guess.
     SUGGESTED_PRESET=low_vram
     SUGGESTED_REASON="VRAM size undetermined, defaulting to the safe tier"
@@ -521,14 +443,6 @@ else
     SUGGESTED_REASON="${VRAM_GB} GB VRAM"
 fi
 
-# quality runs the vocoder on onnxruntime's CUDA path, which doesn't exist on
-# ROCm — on AMD the server would quietly run it on the CPU anyway, i.e. it
-# would just be balanced. Suggest balanced directly.
-if [[ "$VENDOR" == amd && "$SUGGESTED_PRESET" == quality ]]; then
-    SUGGESTED_PRESET=balanced
-    SUGGESTED_REASON="${VRAM_GB} GB VRAM; quality's GPU vocoder is NVIDIA-only"
-fi
-
 echo
 echo "  Auto-detected suggestion: ${BOLD}${SUGGESTED_PRESET}${RESET} (${SUGGESTED_REASON})"
 read -rp "  Use this automatically, or pick a preset yourself? [A]uto / [M]anual: " preset_mode
@@ -539,7 +453,7 @@ if [[ "$preset_mode" =~ ^[Mm] ]]; then
     # what the original project itself documents.
     echo
     echo "  preset               VRAM (approx)   notes"
-    echo "  quality              ~14-16 GB       fastest; vocoder on GPU (NVIDIA only)"
+    echo "  quality              ~14-16 GB       fastest; vocoder on GPU"
     echo "  balanced             ~9-12 GB        LM on GPU (fast), vocoder on CPU"
     echo "  low_vram             ~7-8 GB         also drops CUDA-graph capture + shorter line cap"
     echo "  potato               ~6 GB           as low_vram with the shortest line cap; not quantized"
@@ -550,9 +464,6 @@ if [[ "$preset_mode" =~ ^[Mm] ]]; then
             quality|balanced|low_vram|potato)
                 PRESET="$manual_preset"
                 PRESET_REASON="manually selected"
-                if [[ "$VENDOR" == amd && "$PRESET" == quality ]]; then
-                    warn "quality's GPU vocoder is NVIDIA-only — on AMD it runs on the CPU, same as balanced."
-                fi
                 break
                 ;;
             *)
@@ -620,7 +531,6 @@ fi
 # -----------------------------------------------------------------------------
 RAM_MB="$(awk '/^MemTotal:/ {print int($2 / 1024)}' /proc/meminfo 2>/dev/null || echo 0)"
 MEM_LIMIT_LINES=""
-SHM_SIZE="8g"   # AMD only; shrunk below to fit inside the memory limit
 if [[ "${RAM_MB:-0}" -gt 0 ]]; then
     RESERVE_MB=$(( RAM_MB / 4 ))
     (( RESERVE_MB < 3072 )) && RESERVE_MB=3072
@@ -630,7 +540,6 @@ if [[ "${RAM_MB:-0}" -gt 0 ]]; then
         warn "Only $(( RAM_MB / 1024 )) GB of system RAM — not enough to safely cap the server's memory."
         warn "Skipping the memory limit; close other apps while the server is running."
     else
-        (( LIMIT_MB / 2 < 8192 )) && SHM_SIZE="$(( LIMIT_MB / 2 ))m"
         MEM_LIMIT_LINES="    mem_limit: ${LIMIT_MB}m
     memswap_limit: ${LIMIT_MB}m
 "
@@ -654,22 +563,27 @@ if [[ -f "$COMPOSE_FILE" ]]; then
     mv "$COMPOSE_FILE" "$backup"
 fi
 
-# sfx_cache only ever gets populated by a successful outgoing fetch — with
-# network access declined there's nothing that would ever be written to it,
-# so skip provisioning the volume entirely rather than leave an always-empty
-# one lying around.
-SFX_VOLUME_LINE=""
-SFX_VOLUME_DECL=""
-if [[ "$SFX_ALLOW_NETWORK" == "1" ]]; then
-    SFX_VOLUME_LINE="      - pone-ttsmod_sfx_cache:/app/sfx_cache
-"
-    SFX_VOLUME_DECL="  pone-ttsmod_sfx_cache:
-"
+# One data folder (server/data) holds settings, history, caches and
+# pronunciations.txt. Move what older versions kept in separate folders.
+mkdir -p server/data
+for name in history st_cache; do
+    if [[ -e "server/$name" && ! -e "server/data/$name" ]]; then
+        mv "server/$name" "server/data/$name" || warn "Couldn't move server/$name into server/data/ — move it yourself."
+    fi
+done
+if [[ -d server/state ]]; then
+    for f in server/state/* server/state/.[!.]*; do
+        [[ -e "$f" ]] || continue
+        [[ -e "server/data/$(basename "$f")" ]] || mv "$f" server/data/ || warn "Couldn't move $f into server/data/."
+    done
+    rmdir server/state 2>/dev/null || true
+fi
+if [[ -f server/pronunciations.txt && ! -e server/data/pronunciations.txt ]]; then
+    cp server/pronunciations.txt server/data/pronunciations.txt
 fi
 
-if [[ "$VENDOR" == nvidia ]]; then
-    cat > "$COMPOSE_FILE" <<EOF
-# Generated by run.sh — NVIDIA build, preset: ${PRESET} (${PRESET_REASON})
+cat > "$COMPOSE_FILE" <<EOF
+# Generated by run.sh — preset: ${PRESET} (${PRESET_REASON})
 services:
   pone-ttsmod:
     build:
@@ -690,81 +604,21 @@ ${MEM_LIMIT_LINES}    deploy:
       - "${HOST_PORT}:${HOST_PORT}"
     volumes:
       - pone-ttsmod_release:/app/release
-${SFX_VOLUME_LINE}      - ./server/voice_patch:/app/voice_patch   # the voice patch is downloaded here on first start
-      - ./server/st_cache:/app/st_cache             # cache for the /st_cache/generate endpoint — visible/durable on the host
-      - ./server/history:/app/history               # every generated line, playable from the web page (MOSS_HISTORY_MAX)
-      - ./server/pronunciations.txt:/app/pronunciations.txt  # edited from the web page's Pronunciations button
-      - ./server/state:/app/state                   # web-page settings (voice effects, blends, preset) survive recreates
+      - ./server/voice_patch:/app/voice_patch   # the voice patch is downloaded here on first start
+      - ./server/data:/app/data                 # settings, history, caches, pronunciations.txt
     environment:
       - MOSS_PERF_PRESET=${PRESET}
       - MOSS_SFX_ALLOW_NETWORK=${SFX_ALLOW_NETWORK}
       - PORT=${HOST_PORT}
-      - MOSS_STATE_DIR=/app/state
+      - MOSS_DATA_DIR=/app/data
 
 volumes:
   pone-ttsmod_release:
-${SFX_VOLUME_DECL}
 EOF
-else
-    cat > "$COMPOSE_FILE" <<EOF
-# Generated by run.sh — AMD/ROCm build, preset: ${PRESET} (${PRESET_REASON})
-#
-# NOTE: some AMD GPUs aren't in ROCm's officially supported list and need
-# HSA_OVERRIDE_GFX_VERSION set to the nearest supported architecture to
-# actually initialize (e.g. a RX 7700S/gfx1102 needs 11.0.2 — map your gfxNNNN
-# to MAJOR.MINOR.PATCH directly, e.g. gfx1102 -> 11.0.2; don't assume gfx1100's
-# override value works for a different chip, even in the same family). This
-# script can't reliably auto-detect whether that's needed for your specific
-# card, or its correct value — if the container starts but
-# torch.cuda.is_available() comes back false, or you see HSA/HIP errors
-# (e.g. HSA_STATUS_ERROR_INVALID_ISA) in the logs, that's the first thing to
-# check. Add it under environment: below and rebuild.
-services:
-  pone-ttsmod:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      target: runtime-rocm
-    image: pone-ttsmod:rocm
-    container_name: pone-ttsmod
-    restart: unless-stopped
-${MEM_LIMIT_LINES}    devices:
-      - /dev/kfd
-      - /dev/dri
-    group_add:
-      - video
-      - render
-    security_opt:
-      - seccomp=unconfined
-    cap_add:
-      - SYS_PTRACE
-    ipc: host
-    shm_size: "${SHM_SIZE}"
-    ports:
-      - "${HOST_PORT}:${HOST_PORT}"
-    volumes:
-      - pone-ttsmod_release:/app/release
-${SFX_VOLUME_LINE}      - ./server/voice_patch:/app/voice_patch   # the voice patch is downloaded here on first start
-      - ./server/st_cache:/app/st_cache             # cache for the /st_cache/generate endpoint — visible/durable on the host
-      - ./server/history:/app/history               # every generated line, playable from the web page (MOSS_HISTORY_MAX)
-      - ./server/pronunciations.txt:/app/pronunciations.txt  # edited from the web page's Pronunciations button
-      - ./server/state:/app/state                   # web-page settings (voice effects, blends, preset) survive recreates
-    environment:
-      - MOSS_PERF_PRESET=${PRESET}
-      - MOSS_SFX_ALLOW_NETWORK=${SFX_ALLOW_NETWORK}
-      - PORT=${HOST_PORT}
-      - MOSS_STATE_DIR=/app/state
-      # - HSA_OVERRIDE_GFX_VERSION=11.0.2   # uncomment + adjust if needed, see note above
-
-volumes:
-  pone-ttsmod_release:
-${SFX_VOLUME_DECL}
-EOF
-fi
 
 echo "  Wrote $COMPOSE_FILE"
 # create the bind-mounted folders now so they're owned by you, not root
-mkdir -p server/state server/history server/st_cache
+mkdir -p server/data server/voice_patch
 
 if [[ ! -f "server/voice_patch/adapter_model.safetensors" ]]; then
     info "The voice patch (~100 MB) will be downloaded on the first start."
@@ -804,7 +658,7 @@ fi
 echo
 info "Ready to go. This will:"
 if [[ "$DO_BUILD" -eq 1 ]]; then
-    echo "    - Build the ${VENDOR} image (several minutes, larger for ROCm)"
+    echo "    - Build the image (several minutes)"
 else
     echo "    - Reuse the existing ${IMAGE_TAG} image (no build)"
 fi

@@ -27,34 +27,24 @@ if not defined PY (
 
 REM --- venv ---
 if not exist venv (
-  echo [1/5] Creating Python environment...
+  echo [1/4] Creating Python environment...
   %PY% -m venv venv || ( echo Failed to create venv. & pause & exit /b 1 )
 )
 set "VPY=venv\Scripts\python.exe"
 "%VPY%" -m pip install --upgrade pip wheel
 
 REM --- PyTorch (CUDA 12.8 build) ---
-echo [2/5] Installing PyTorch (CUDA 12.8)... this is a big download
+echo [2/4] Installing PyTorch (CUDA 12.8)... this is a big download
 "%VPY%" -m pip install --index-url https://download.pytorch.org/whl/cu128 torch==2.11.0 torchaudio==2.11.0 ^
   || ( echo PyTorch install failed. & pause & exit /b 1 )
 
 REM --- the rest of the deps ---
-echo [3/5] Installing server dependencies...
+echo [3/4] Installing server dependencies...
 "%VPY%" -m pip install -r requirements.txt || ( echo Dependency install failed. & pause & exit /b 1 )
 
-REM --- model weights ---
-echo [4/5] Downloading the voice model from HuggingFace (~12 GB, one time)...
-"%VPY%" download_model.py || ( echo Model download failed. & pause & exit /b 1 )
-
-REM --- sanity check the model bundle downloaded (runtime is used as-is) ---
-if not exist "release\moss_tts_torchopt_runner_bundle\portable_tts_runtime.py" ( echo Model bundle missing - download may have failed. & pause & exit /b 1 )
-
-REM --- fix the downloaded bundle (crashes on the first generation without it) ---
-"%VPY%" patch_torchopt_bundle.py || ( echo Bundle patch failed. & pause & exit /b 1 )
-
-REM --- v2.5 voice patch (pronunciation fine-tune, merged into the model once) ---
-echo [5/5] Applying the v2.5 voice patch (a few minutes)...
-"%VPY%" apply_voice_patch.py || ( echo Voice patch failed. & pause & exit /b 1 )
+REM --- model (~12 GB, one time), voice patch and bundle fix: see prepare.py ---
+echo [4/4] Downloading the voice model (~12 GB, one time) and applying the patches...
+"%VPY%" prepare.py || ( echo Setup failed - see the messages above. & pause & exit /b 1 )
 
 REM Mark setup COMPLETE - only now is the model fully downloaded.
 REM The launcher checks this marker so it never starts with no model.

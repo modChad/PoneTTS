@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-shot setup for the MOSS-TTS-PNY server (Linux + NVIDIA GPU).
+# One-shot setup for the PoneTTS server (Linux + NVIDIA GPU).
 #
 # Creates a venv, installs deps, downloads the model (~12 GB) from HuggingFace,
 # and applies the v2.5 voice patch (pronunciation fix). Run once, then start with:
@@ -26,33 +26,18 @@ echo "[setup] installing PyTorch (CUDA 12.8 build)..."
 echo "[setup] installing server deps..."
 "$PY" -m pip install -r requirements.txt
 
-# 3) download the model weights from HuggingFace (public repo)
-echo "[setup] downloading model (~12 GB, one time)..."
-"$PY" download_model.py
+# 3) download the model (~12 GB, one time), apply the voice patch and fix the
+# downloaded bundle. Same steps as the Docker entrypoint; see prepare.py.
+"$PY" prepare.py
 
-# 4) sanity-check the model bundle downloaded (server imports the runtime as-is)
-BUNDLE="release/moss_tts_torchopt_runner_bundle"
-if [ ! -f "$BUNDLE/portable_tts_runtime.py" ]; then
-  echo "[setup] WARNING: bundle runtime not found at $BUNDLE — download may have failed."
-  exit 1
-fi
-
-# 4b) fix the downloaded bundle (missing feedback_lookup_tables parameter;
-# crashes on the first generation without it). Idempotent.
-echo "[setup] patching the torchopt bundle..."
-"$PY" patch_torchopt_bundle.py
-
-# 5) apply the v2.5 voice patch (pronunciation fine-tune, merged into the model once)
-echo "[setup] applying the v2.5 voice patch (a few minutes)..."
-"$PY" apply_voice_patch.py
-
-# 6) record a performance preset if one was requested (MOSS_PERF_PRESET=low_vram ./setup.sh)
+# 4) record a performance preset if one was requested (MOSS_PERF_PRESET=low_vram ./setup.sh)
 if [ -n "${MOSS_PERF_PRESET:-}" ]; then
-  echo "${MOSS_PERF_PRESET}" > preset.conf
+  mkdir -p data
+  echo "${MOSS_PERF_PRESET}" > data/preset.conf
   echo "[setup] performance preset set to: ${MOSS_PERF_PRESET}"
 fi
 
-# 7) mark setup COMPLETE — only now is the model fully downloaded + patched. The
+# 5) mark setup COMPLETE — only now is the model fully downloaded + patched. The
 # launcher checks this marker (not just the venv) so it never tries to start the
 # server while a download is still in progress.
 : > "$HERE/.setup_done"

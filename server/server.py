@@ -71,19 +71,55 @@ _default_audio_temperature = float(os.environ.get("MOSS_AUDIO_TEMPERATURE", "0.8
 # Preset hot-swap state (the web-page dropdown reloads the model in the background).
 _reload_lock = threading.Lock()
 _reload_state = {"busy": False, "target": None, "error": None}
-# Settings changed at runtime (web page / API) are saved here. Defaults to the
-# server folder; Docker sets MOSS_STATE_DIR to a bind-mounted folder so they
-# survive the container being recreated. Files shipped in the server folder
-# (voice_blend.json, pronunciation_cache.json) seed it on first start.
+# Everything the server writes, or you edit, lives in ONE data folder: settings
+# (preset, voice effects, blends), history, the clip and sound-effect caches,
+# pronunciations.txt and the Freesound key. Default: server/data. Docker mounts
+# it from the host with MOSS_DATA_DIR=/app/data (MOSS_STATE_DIR is the old name).
+# On first start the files in defaults/ are copied in.
 _SERVER_DIR = Path(__file__).resolve().parent
-STATE_DIR = Path(os.environ.get("MOSS_STATE_DIR") or _SERVER_DIR).resolve()
-STATE_DIR.mkdir(parents=True, exist_ok=True)
-if STATE_DIR != _SERVER_DIR:
-    import shutil as _shutil
-    for _name in ("voice_blend.json", "voice_fx.json", "pronunciation_cache.json", "preset.conf"):
-        if not (STATE_DIR / _name).exists() and (_SERVER_DIR / _name).exists():
-            _shutil.copy2(_SERVER_DIR / _name, STATE_DIR / _name)
-PRESET_FILE = STATE_DIR / "preset.conf"
+DATA_DIR = Path(os.environ.get("MOSS_DATA_DIR") or os.environ.get("MOSS_STATE_DIR")
+                or (_SERVER_DIR / "data")).resolve()
+DEFAULTS_DIR = _SERVER_DIR / "defaults"
+_DATA_FILES = ("preset.conf", "voice_blend.json", "voice_fx.json", "pronunciation_cache.json",
+               "pronunciations.txt", "freesound_key.txt")
+_DATA_DIRS = ("history", "st_cache", "sfx_cache")
+
+
+def _setup_data_dir() -> None:
+    import shutil
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    # One-time move from where older versions kept these (the server folder and
+    # server/state). If a move fails (e.g. the old path is a Docker bind mount),
+    # copy instead so nothing is lost.
+    for old_root in (_SERVER_DIR, _SERVER_DIR / "state"):
+        if not old_root.is_dir() or old_root.resolve() == DATA_DIR:
+            continue
+        for name in _DATA_FILES + _DATA_DIRS:
+            old, new = old_root / name, DATA_DIR / name
+            if not old.exists() or new.exists():
+                continue
+            try:
+                os.rename(old, new)   # plain rename only: never deletes anything after a copy
+                print(f"[server] moved {old} -> {new}", flush=True)
+            except OSError:
+                try:
+                    if old.is_dir():
+                        shutil.copytree(old, new)
+                    else:
+                        shutil.copy2(old, new)
+                    print(f"[server] copied {old} -> {new}", flush=True)
+                except OSError as exc:
+                    print(f"[server] WARNING: could not move {old} into {DATA_DIR}: {exc}", flush=True)
+    for f in DEFAULTS_DIR.glob("*"):
+        if f.is_file() and not (DATA_DIR / f.name).exists():
+            shutil.copy2(f, DATA_DIR / f.name)
+    for name in _DATA_DIRS:
+        (DATA_DIR / name).mkdir(exist_ok=True)
+
+
+_setup_data_dir()
+STATE_DIR = DATA_DIR   # older name, still used below
+PRESET_FILE = DATA_DIR / "preset.conf"
 
 
 def load_speakers() -> list[dict]:
@@ -124,7 +160,7 @@ SPEAKER_IDS = {s["id"] for s in SPEAKERS}
 #      fix that except spelling the word differently. That's the job of the
 #      user-editable override dictionary in pronunciations.txt.
 PROJECT_DIR = RELEASE_DIR.parent  # computed before the chdir into the bundle
-PRONUNCIATION_FILE = PROJECT_DIR / "pronunciations.txt"
+PRONUNCIATION_FILE = DATA_DIR / "pronunciations.txt"
 
 _SMART = str.maketrans({
     "‘": "'", "’": "'", "‚": "'", "‛": "'",  # single quotes
@@ -992,7 +1028,7 @@ def _activity() -> list[dict]:
 # details, newest MOSS_HISTORY_MAX kept (0 = off). Browsable and playable from
 # the web page; the files are plain WAVs on disk if the folder is mounted.
 # ----------------------------------------------------------------------------
-HISTORY_DIR = PROJECT_DIR / "history"
+HISTORY_DIR = DATA_DIR / "history"
 HISTORY_MAX = int(os.environ.get("MOSS_HISTORY_MAX", "500"))
 _history_lock = threading.Lock()
 _HISTORY_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -1900,8 +1936,8 @@ import hashlib
 import urllib.parse
 import urllib.request as _urlreq
 
-SFX_CACHE_DIR = PROJECT_DIR / "sfx_cache"
-SFX_KEY_FILE = PROJECT_DIR / "freesound_key.txt"
+SFX_CACHE_DIR = DATA_DIR / "sfx_cache"
+SFX_KEY_FILE = DATA_DIR / "freesound_key.txt"
 SFX_MAX_DURATION = 12.0   # seconds; filter applied at search time
 # On by default (existing behavior). Set MOSS_SFX_ALLOW_NETWORK=0 to disable
 # every outgoing call this feature makes (Freesound API/scrape, BBC archive)
@@ -2419,7 +2455,7 @@ def openai_compat_generate(req: OpenAISpeechRequest, request: Request):
 # wasn't wanted — no point accumulating every retry). Files are then served
 # directly as static downloads from /st_cache/, so the extension can offer a
 # plain clickable link rather than needing blob/IndexedDB machinery.
-ST_CACHE_DIR = Path(__file__).resolve().parent / "st_cache"
+ST_CACHE_DIR = DATA_DIR / "st_cache"
 ST_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -2843,22 +2879,18 @@ _active_preset = DEFAULT_PRESET
 def _resolve_vocoder(requested: str) -> str:
     """Return the vocoder runtime to actually use.
 
-    onnx_cuda needs onnxruntime's CUDA provider on an NVIDIA GPU. It isn't
-    available on ROCm (AMD), or if the CPU onnxruntime package overwrote the
-    GPU one. The bundle would quietly fall back to the CPU in that case; do
-    it here instead so the log says so."""
+    onnx_cuda needs onnxruntime's CUDA provider. It's missing if the CPU
+    onnxruntime package overwrote the GPU one. The bundle would quietly fall
+    back to the CPU in that case; do it here instead so the log says so."""
     if requested != "onnx_cuda":
         return requested
     reason = None
-    if getattr(torch.version, "hip", None):
-        reason = "AMD/ROCm GPU (onnxruntime's CUDA provider is NVIDIA-only)"
-    else:
-        try:
-            import onnxruntime as ort
-            if "CUDAExecutionProvider" not in ort.get_available_providers():
-                reason = "onnxruntime has no CUDA provider (is onnxruntime-gpu installed?)"
-        except Exception as exc:  # noqa: BLE001
-            reason = f"onnxruntime failed to import ({exc})"
+    try:
+        import onnxruntime as ort
+        if "CUDAExecutionProvider" not in ort.get_available_providers():
+            reason = "onnxruntime has no CUDA provider (is onnxruntime-gpu installed?)"
+    except Exception as exc:  # noqa: BLE001
+        reason = f"onnxruntime failed to import ({exc})"
     if reason:
         print(f"[server] WARNING: GPU vocoder unavailable: {reason}. "
               f"Running the vocoder on the CPU (onnx_cpu) instead.", flush=True)

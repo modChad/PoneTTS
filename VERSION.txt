@@ -8,10 +8,9 @@ Paradise (PPP) and SillyTavern.
 Updated: 2026-09-28
 Previously: TTSMODv4-BERK (server v2.8, pass 1 of 2)
 
-AMD (ROCm) SUPPORT IS HIGHLY EXPERIMENTAL
-  NVIDIA is the supported path. The AMD image has run on exactly one
-  machine (an RX 7700S laptop) and needed manual workarounds to get there.
-  Expect problems on other AMD cards, and don't rely on it yet.
+NVIDIA ONLY
+  PoneTTS needs an NVIDIA GPU. AMD (ROCm) support has been removed. No
+  local GPU? Use the Google Colab notebook in colab/.
 
 
 QUICK START (Linux, or Windows via WSL2)
@@ -29,9 +28,8 @@ QUICK START (Linux, or Windows via WSL2)
   apt repo, and prints LAN-access steps (mirrored networking or netsh
   portproxy). The voice patch is downloaded automatically on first start.
 
-  Before running: your GPU driver must work outside Docker (nvidia-smi or
-  rocm-smi should list your card). On NVIDIA, run.sh also checks for the
-  NVIDIA Container Toolkit and offers to install it.
+  Before running: your GPU driver must work outside Docker (nvidia-smi should
+  list your card). run.sh also checks for the NVIDIA Container Toolkit and offers to install it.
 
   First start downloads the ~12 GB model; allow up to ~20 minutes.
 
@@ -39,8 +37,9 @@ QUICK START (Linux, or Windows via WSL2)
 NAMES
 -----
   Container / service   pone-ttsmod
-  Images                pone-ttsmod:cuda (NVIDIA), pone-ttsmod:rocm (AMD)
-  Volumes               pone-ttsmod_release (model), pone-ttsmod_sfx_cache
+  Image                 pone-ttsmod:cuda
+  Volume                pone-ttsmod_release (model)
+  Data folder           server/data (mounted at /app/data)
   Default port          8800
   SillyTavern URL       http://pone-ttsmod:8800/v1/audio/speech
 
@@ -51,24 +50,20 @@ NAMES
 
 BUILD TARGETS
 -------------
-  runtime-cuda   NVIDIA   CUDA 12.8, torch 2.11.0
-  runtime-rocm   AMD      ROCm 6.4,  torch 2.9.1 (newest with a rocm6.4 wheel)
-                          (highly experimental, see above)
-
-  Both use Python 3.12 (required by numpy 2.5.0).
+  runtime-cuda   CUDA 12.8, torch 2.11.0, Python 3.12 (required by
+                 numpy 2.5.0)
 
 
 PERFORMANCE PRESETS (MOSS_PERF_PRESET)
 --------------------------------------
-  quality    ~14-16 GB   vocoder on GPU (NVIDIA only; on AMD it falls back
-                         to the CPU, same as balanced)
+  quality    ~14-16 GB   vocoder on GPU
   balanced   ~9-12 GB    vocoder on CPU (server default)
   low_vram   ~7-8 GB     no CUDA-graph capture, shorter line cap
   potato     ~6 GB       as low_vram with the shortest line cap. Not
                          quantized: the model bundle has no int8 support
 
   run.sh suggests: under 7 GB potato, 7-9 GB low_vram, 9-12.5 GB balanced,
-  above that quality (balanced on AMD).
+  above that quality.
 
   Switchable live from the web page at http://localhost:8800/
 
@@ -117,18 +112,25 @@ FEATURES
 
 KNOWN ISSUES
 ------------
-  - AMD: the ROCm image sets HSA_OVERRIDE_GFX_VERSION=11.0.2 (RX 7700S,
-    gfx1102) for every AMD card. Other cards may need a different value or
-    none at all. docker-compose.snippet.yml still shows 11.0.0.
-  - AMD confirmed on real hardware (RX 7700S): the image builds, the model
-    downloads, and the server loads onto the GPU and reports ready. Still
-    open on that machine: Docker networking (no DNS from the container, port
-    8800 unreachable from the host) and a system out-of-memory crash while
-    running. The NVIDIA image hasn't been built on real hardware yet.
+  - The NVIDIA image hasn't been confirmed on real hardware yet.
 
 
 CHANGES IN THIS RELEASE
 -----------------------
+  - NVIDIA only: removed AMD/ROCm support (the runtime-rocm Docker target,
+    AMD detection in run.sh, the AMD compose example)
+  - One data folder, server/data (MOSS_DATA_DIR; Docker: /app/data): settings,
+    history, clip and sound-effect caches, pronunciations.txt and the
+    Freesound key. Older locations are moved there on first start; re-run
+    ./run.sh once so the compose file mounts it. Starting files live in
+    server/defaults/ instead of being edited in place
+  - server/prepare.py runs the setup steps (model download, voice patch,
+    bundle fix) for Docker, setup.sh, setup.bat and Colab alike
+  - Removed the root copies of setup.sh, run_server.sh, requirements.txt
+    and the voice patch README (use the ones in server/)
+  - Google Colab notebook added in colab/
+  - The voice patch is downloaded on first start instead of stored with
+    Git LFS
   - Stop generations: POST /cancel?scope=mine|all, plus "Stop mine" and
     "Stop all" buttons on the web page. Stops between sentences (the
     current one finishes); queued requests never start; later requests are
@@ -174,24 +176,22 @@ CHANGES IN THIS RELEASE
     comments always said
   - Model download uses the plain HuggingFace downloader by default
     (HF_HUB_ENABLE_HF_TRANSFER=0, HF_HUB_DISABLE_XET=1). The fast downloaders
-    got the container killed mid-download on the AMD test machine; the
+    got the container killed mid-download on the test machine; the
     plain one finished the full download in 7m40s
   - run.sh caps the container's system RAM (all but a quarter of RAM,
     keeping at least 3 GB back, swap off for the container), so running out
-    of memory restarts the server instead of taking down the desktop. On
-    AMD, shm_size shrinks to fit inside the cap
+    of memory restarts the server instead of taking down the desktop
   - run.sh checks for the NVIDIA Container Toolkit and offers to install it
     (pacman, or apt/dnf/zypper when NVIDIA's repo is set up), then restarts
     Docker
   - run.sh preset thresholds: 6 GB cards now get potato (was low_vram);
-    warns under ~5.5 GB; AMD is never auto-suggested quality
+    warns under ~5.5 GB
   - potato relabelled everywhere: it was described as int8 (bitsandbytes),
     but the model bundle only supports "none" or torchao fp8
-  - Docker images install exactly one onnxruntime package: onnxruntime-gpu
-    on NVIDIA (the build now fails if its CUDA provider is missing), CPU
-    onnxruntime on AMD. Previously faster-whisper's CPU package could
-    overwrite the GPU one
+  - The Docker image installs exactly one onnxruntime package,
+    onnxruntime-gpu (the build fails if its CUDA provider is missing).
+    Previously faster-whisper's CPU package could overwrite the GPU one
   - Server logs a clear warning and uses the CPU vocoder when quality's GPU
-    vocoder can't run (AMD, or no CUDA provider), instead of falling back
+    vocoder can't run (no CUDA provider), instead of falling back
     silently
   - server/README.md: default preset corrected to balanced

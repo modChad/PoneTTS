@@ -33,7 +33,7 @@ PIDFILE = HERE / ".tts_server.pid"
 HOST = "0.0.0.0"
 PORT = 8000
 URL = f"http://127.0.0.1:{PORT}"
-PRESET_FILE = HERE / "preset.conf"
+PRESET_FILE = Path(os.environ.get("MOSS_DATA_DIR") or os.environ.get("MOSS_STATE_DIR") or (HERE / "data")) / "preset.conf"
 PRESETS = ("quality", "balanced", "low_vram", "potato")
 
 
@@ -229,6 +229,7 @@ def set_preset() -> None:
         print("  low_vram : ~8 GB         (no CUDA-graph, vocoder on CPU, shorter cap)")
         print("  potato   : ~6 GB         (as low_vram, shortest line cap; not quantized)")
         return
+    PRESET_FILE.parent.mkdir(parents=True, exist_ok=True)
     PRESET_FILE.write_text(name + "\n", encoding="utf-8")
     print(f"preset set to '{name}'. Apply with: ./tts.py restart")
 

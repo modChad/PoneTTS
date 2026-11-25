@@ -1,10 +1,14 @@
+.git/
 server/venv/
 server/release/
 server/.setup_done
 server/tts_server.log
+server/.tts_server.pid
 server/*.pyc
 server/__pycache__/
+server/data/
+server/state/
 server/history/
 server/st_cache/
-server/state/
-.git/
+server/sfx_cache/
+server/voice_patch/*.part

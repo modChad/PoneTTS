@@ -1,14 +1,10 @@
 #!/usr/bin/env bash
-# Container entrypoint: mirrors what setup.sh did on bare metal, minus the
-# venv (the image's system python already has everything installed). Runs
-# once per fresh volume — the .setup_done marker lives inside release/ (the
-# model volume), so it survives container restarts/recreates but re-runs if
-# you ever wipe that volume.
+# Container entrypoint: runs prepare.py (the same setup steps setup.sh uses on
+# bare metal), checks the GPU, then starts the server. The model download only
+# happens once per volume: prepare.py's .setup_done marker lives in release/.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
-MARKER="release/.setup_done"
-BUNDLE="release/moss_tts_torchopt_runner_bundle"
 
 # Explain a failed step instead of exiting silently (a process killed by a
 # signal, e.g. the out-of-memory killer, prints nothing of its own).
@@ -27,51 +23,27 @@ explain_exit() {
     df -h release 2>&1 | sed 's/^/[entrypoint]   /' >&2 || true
 }
 
-if [ ! -f "$MARKER" ]; then
-    echo "[entrypoint] first run on this volume: downloading model (~12 GB)..."
-    rc=0; python3 download_model.py || rc=$?
-    if [ "$rc" -ne 0 ]; then
-        explain_exit "model download" "$rc"
-        # Pause before exiting so the restart policy doesn't hammer
-        # HuggingFace (and fill the log) in a tight loop.
-        sleep 60
-        exit "$rc"
-    fi
-
-    if [ ! -f "$BUNDLE/portable_tts_runtime.py" ]; then
-        echo "[entrypoint] ERROR: model bundle not found at $BUNDLE — download failed."
-        exit 1
-    fi
-
-    : > "$MARKER"
-    echo "[entrypoint] first-run setup complete."
+# Download the model (first start on this volume only), apply the voice patch
+# and fix the torchopt bundle. prepare.py skips whatever is already done, so
+# dropping adapter_model.safetensors into voice_patch/ later and restarting
+# still picks it up.
+rc=0; python3 prepare.py || rc=$?
+if [ "$rc" -ne 0 ]; then
+    explain_exit "setup (prepare.py)" "$rc"
+    # Pause before exiting so the restart policy doesn't hammer
+    # HuggingFace (and fill the log) in a tight loop.
+    sleep 60
+    exit "$rc"
 fi
 
-STATE_DIR="${MOSS_STATE_DIR:-.}"
-mkdir -p "$STATE_DIR"
-if [ -n "${MOSS_PERF_PRESET:-}" ] && [ ! -f "$STATE_DIR/preset.conf" ]; then
-    echo "${MOSS_PERF_PRESET}" > "$STATE_DIR/preset.conf"
+DATA_DIR="${MOSS_DATA_DIR:-${MOSS_STATE_DIR:-data}}"
+mkdir -p "$DATA_DIR"
+if [ -n "${MOSS_PERF_PRESET:-}" ] && [ ! -f "$DATA_DIR/preset.conf" ]; then
+    echo "${MOSS_PERF_PRESET}" > "$DATA_DIR/preset.conf"
     echo "[entrypoint] performance preset set to: ${MOSS_PERF_PRESET}"
 fi
 
-# --- Reapply the voice patch on every start, not just first-run. It's
-# already internally idempotent (checks its own marker inside the checkpoint
-# dir) — running it unconditionally means dropping adapter_model.safetensors
-# into the (bind-mounted) voice_patch/ folder later and restarting actually
-# picks it up, rather than being silently skipped forever because
-# $MARKER already exists from an earlier run where the file was missing.
-echo "[entrypoint] checking voice patch..."
-python3 apply_voice_patch.py
-
-# --- Reapply local fixes to the downloaded torchopt bundle. Runs every start
-# (not just first-run) — it's cheap and idempotent, and this way it's not
-# silently skipped if the bundle is ever re-downloaded or reset later without
-# also clearing $MARKER. See patch_torchopt_bundle.py for what/why.
-echo "[entrypoint] checking torchopt bundle patches..."
-python3 patch_torchopt_bundle.py
-
-# --- Pre-set LD_LIBRARY_PATH to pip's bundled NVIDIA libs (CUDA build only;
-# no-op on ROCm, where no `nvidia` pip packages exist to find). -------------
+# --- Pre-set LD_LIBRARY_PATH to pip's bundled NVIDIA libs. -----------------
 # The runtime otherwise self-restarts itself via os.execv the first time it
 # needs to fix this up, which server.py's own comments warn is unsafe after
 # a chdir — and entrypoint.sh chdir's into /app above. Setting this here
@@ -104,11 +76,10 @@ import sys
 import torch
 if not torch.cuda.is_available():
     print("[entrypoint] ERROR: torch.cuda.is_available() is False — the GPU "
-          "isn't visible to this container. Check that you passed the right "
-          "GPU device flags for this backend (--gpus all / nvidia deploy "
-          "reservation for CUDA, --device=/dev/kfd --device=/dev/dri for "
-          "ROCm) and that the host driver is installed and working outside "
-          "Docker first (nvidia-smi / rocm-smi).", file=sys.stderr)
+          "isn't visible to this container. Check that the GPU is passed "
+          "through (--gpus all, or the nvidia deploy reservation in compose), "
+          "that the NVIDIA Container Toolkit is installed, and that "
+          "nvidia-smi works on the host outside Docker.", file=sys.stderr)
     sys.exit(1)
 print(f"[entrypoint] GPU visible: {torch.cuda.get_device_name(0)}")
 PYEOF
