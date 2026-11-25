@@ -690,7 +690,7 @@ ${MEM_LIMIT_LINES}    deploy:
       - "${HOST_PORT}:${HOST_PORT}"
     volumes:
       - pone-ttsmod_release:/app/release
-${SFX_VOLUME_LINE}      - ./server/voice_patch:/app/voice_patch   # drop adapter_model.safetensors here if missing — no rebuild needed
+${SFX_VOLUME_LINE}      - ./server/voice_patch:/app/voice_patch   # the voice patch is downloaded here on first start
       - ./server/st_cache:/app/st_cache             # cache for the /st_cache/generate endpoint — visible/durable on the host
       - ./server/history:/app/history               # every generated line, playable from the web page (MOSS_HISTORY_MAX)
       - ./server/pronunciations.txt:/app/pronunciations.txt  # edited from the web page's Pronunciations button
@@ -744,7 +744,7 @@ ${MEM_LIMIT_LINES}    devices:
       - "${HOST_PORT}:${HOST_PORT}"
     volumes:
       - pone-ttsmod_release:/app/release
-${SFX_VOLUME_LINE}      - ./server/voice_patch:/app/voice_patch   # drop adapter_model.safetensors here if missing — no rebuild needed
+${SFX_VOLUME_LINE}      - ./server/voice_patch:/app/voice_patch   # the voice patch is downloaded here on first start
       - ./server/st_cache:/app/st_cache             # cache for the /st_cache/generate endpoint — visible/durable on the host
       - ./server/history:/app/history               # every generated line, playable from the web page (MOSS_HISTORY_MAX)
       - ./server/pronunciations.txt:/app/pronunciations.txt  # edited from the web page's Pronunciations button
@@ -767,88 +767,7 @@ echo "  Wrote $COMPOSE_FILE"
 mkdir -p server/state server/history server/st_cache
 
 if [[ ! -f "server/voice_patch/adapter_model.safetensors" ]]; then
-    warn "server/voice_patch/adapter_model.safetensors is missing."
-    warn "The server will still run without it, but without the v2.5 pronunciation"
-    warn "fix for low-screen-time characters (see server/voice_patch/README.md). If you have"
-    warn "this file, just drop it into ./server/voice_patch/ — it's bind-mounted, so no"
-    warn "rebuild is needed, even after the container's already running."
-fi
-
-# -----------------------------------------------------------------------------
-# 5b. Voice patch: make sure adapter_model.safetensors is the real weights file,
-# not a Git LFS placeholder. *.safetensors are stored with Git LFS (see
-# .gitattributes), so a clone made without git-lfs installed (e.g. a fresh WSL
-# Ubuntu) leaves a ~130-byte text pointer in its place, and the container then
-# fails with "[voice-patch] ... header too large" on every start. Detect that
-# and offer to install git-lfs and fetch the real file.
-# -----------------------------------------------------------------------------
-PATCH_FILE="server/voice_patch/adapter_model.safetensors"
-
-patch_is_lfs_pointer() {
-    [[ -f "$PATCH_FILE" ]] || return 1
-    local first_bytes
-    first_bytes="$(head -c 64 "$PATCH_FILE" 2>/dev/null | tr -d '\0')"
-    [[ "$first_bytes" == "version https://git-lfs"* ]]
-}
-
-if patch_is_lfs_pointer; then
-    warn "$PATCH_FILE is a Git LFS placeholder ($(wc -c < "$PATCH_FILE") bytes), not the real weights."
-    warn "This usually means the repo was cloned without git-lfs installed. Left as it is, the"
-    warn "container would fail at the voice-patch step on every start."
-
-    if [[ ! -d .git ]] || ! command -v git >/dev/null 2>&1; then
-        error "This isn't a git checkout (or git is missing), so the real file can't be fetched here."
-        error "Copy the real adapter_model.safetensors (about 100 MB) into server/voice_patch/ and re-run."
-        exit 1
-    fi
-
-    if ! git lfs version >/dev/null 2>&1; then
-        LFS_UPDATE=0
-        if command -v pacman >/dev/null 2>&1; then
-            LFS_INSTALL=(sudo pacman -S --needed --noconfirm git-lfs)
-        elif command -v apt-get >/dev/null 2>&1; then
-            LFS_INSTALL=(sudo apt-get install -y git-lfs); LFS_UPDATE=1
-        elif command -v dnf >/dev/null 2>&1; then
-            LFS_INSTALL=(sudo dnf install -y git-lfs)
-        elif command -v zypper >/dev/null 2>&1; then
-            LFS_INSTALL=(sudo zypper --non-interactive install git-lfs)
-        else
-            error "Couldn't find a supported package manager. Install git-lfs yourself, then re-run."
-            exit 1
-        fi
-        if [[ "$LFS_UPDATE" -eq 1 ]]; then
-            echo "  This will run: sudo apt-get update && ${LFS_INSTALL[*]}"
-        else
-            echo "  This will run: ${LFS_INSTALL[*]}"
-        fi
-        read -rp "  Install git-lfs now? [Y/n]: " do_lfs
-        do_lfs="${do_lfs:-Y}"
-        if [[ ! "$do_lfs" =~ ^[Yy] ]]; then
-            error "Without git-lfs the voice patch can't be fetched. Install it, run 'git lfs install' and"
-            error "'git lfs pull', then re-run this script."
-            exit 1
-        fi
-        [[ "$LFS_UPDATE" -eq 1 ]] && sudo apt-get update
-        if ! "${LFS_INSTALL[@]}"; then
-            error "git-lfs install failed — see the output above."
-            exit 1
-        fi
-    fi
-
-    info "Fetching the real voice patch with git lfs..."
-    git lfs install
-    if ! git lfs pull; then
-        error "git lfs pull failed. If the repo host doesn't have the LFS file, copy the real"
-        error "adapter_model.safetensors (about 100 MB) into server/voice_patch/ yourself."
-        exit 1
-    fi
-    ls -l "$PATCH_FILE"
-    if patch_is_lfs_pointer; then
-        error "$PATCH_FILE is still a placeholder after git lfs pull."
-        error "Copy the real adapter_model.safetensors (about 100 MB) into server/voice_patch/ and re-run."
-        exit 1
-    fi
-    echo "  Voice patch file OK."
+    info "The voice patch (~100 MB) will be downloaded on the first start."
 fi
 
 # -----------------------------------------------------------------------------

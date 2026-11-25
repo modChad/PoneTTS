@@ -13,9 +13,17 @@ This script merges voice_patch/ into the downloaded checkpoint IN PLACE:
                                                         delete to reclaim ~6 GB)
 Safe to re-run: a marker file makes it a no-op once applied.
 Needs ~8 GB free RAM (or a GPU) and ~6 GB free disk for a few minutes.
+
+The adapter (voice_patch/adapter_model.safetensors, ~100 MB) is not stored in
+the repo. If it's missing, this script downloads it once from ADAPTER_URL and
+checks its SHA-256. Override with MOSS_VOICE_PATCH_URL / MOSS_VOICE_PATCH_SHA256,
+or set MOSS_VOICE_PATCH_URL=0 to never download (drop the file in yourself).
 """
+import hashlib
+import os
 import shutil
 import sys
+import urllib.request
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -24,19 +32,71 @@ PATCH = HERE / "voice_patch"
 BACKUP = CKPT.with_name(CKPT.name + "_prepatch")
 TMP = CKPT.with_name(CKPT.name + "_patched.tmp")
 MARKER = ".voice_patch_v25"
+ADAPTER = PATCH / "adapter_model.safetensors"
+ADAPTER_URL = os.environ.get("MOSS_VOICE_PATCH_URL", "https://u.pone.rs/qkzcavpd.safetensors").strip()
+ADAPTER_SHA256 = os.environ.get(
+    "MOSS_VOICE_PATCH_SHA256", "a1847c97bb26c51cba6df1a37e7fe0c5a18659a5125d274daed43f1dc428bbb8"
+).strip().lower()
+
+
+def _sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def ensure_adapter() -> bool:
+    """Make sure the adapter is the real file, downloading it if it's missing.
+    The server also reads it at runtime for per-voice blending, so this runs even
+    when the patch is already merged."""
+    if ADAPTER.exists() and ADAPTER.stat().st_size > 1_000_000:
+        return True  # a real-sized file (possibly your own adapter): leave it alone
+    if ADAPTER_URL in ("", "0"):
+        print("[voice-patch] adapter missing and downloading is off (MOSS_VOICE_PATCH_URL=0).")
+        return False
+    print(f"[voice-patch] downloading the voice patch (~100 MB) from {ADAPTER_URL} ...", flush=True)
+    PATCH.mkdir(parents=True, exist_ok=True)
+    part = ADAPTER.with_name(ADAPTER.name + ".part")
+    try:
+        req = urllib.request.Request(ADAPTER_URL, headers={"User-Agent": "PoneTTS"})
+        with urllib.request.urlopen(req, timeout=60) as r, open(part, "wb") as f:
+            total = int(r.headers.get("Content-Length") or 0)
+            done, mark = 0, 10
+            while True:
+                block = r.read(1 << 20)
+                if not block:
+                    break
+                f.write(block)
+                done += len(block)
+                while total and mark <= 100 and done * 100 >= mark * total:
+                    print(f"[voice-patch]   {mark}%  ({done / 1024**2:.0f} MB)", flush=True)
+                    mark += 10
+        got = _sha256(part)
+        if ADAPTER_SHA256 and got != ADAPTER_SHA256:
+            raise ValueError(f"checksum mismatch: got {got}, expected {ADAPTER_SHA256}")
+        part.replace(ADAPTER)
+        print("[voice-patch] download OK, checksum matches.")
+        return True
+    except Exception as exc:  # noqa: BLE001
+        part.unlink(missing_ok=True)
+        print(f"[voice-patch] could not download the voice patch: {exc}")
+        return False
 
 
 def main() -> int:
+    have_adapter = ensure_adapter()
     if (CKPT / MARKER).exists():
         print("[voice-patch] already applied — nothing to do.")
         return 0
     if not (CKPT / "config.json").exists():
         print("[voice-patch] ERROR: model checkpoint not found — run the model download first.")
         return 1
-    if not (PATCH / "adapter_model.safetensors").exists():
-        print("[voice-patch] voice_patch/adapter_model.safetensors not found — skipping.")
-        print("[voice-patch] Server will run on the base (unpatched) model. Drop the file")
-        print("[voice-patch] into voice_patch/ and restart the container to apply it later.")
+    if not have_adapter:
+        print("[voice-patch] no voice patch — skipping. The server will run on the base")
+        print("[voice-patch] (unpatched) model. Drop adapter_model.safetensors into")
+        print("[voice-patch] voice_patch/ (or fix the network) and restart to apply it later.")
         return 0
 
     import torch

@@ -12,7 +12,7 @@ vendor and VRAM, picks a matching performance preset, generates a
 and starts it. Re-running it is safe — an existing `docker-compose.yml` gets
 backed up, not overwritten.
 
-On WSL2, `run.sh` also installs the NVIDIA Container Toolkit from NVIDIA's apt repo, starts Docker with `sudo service docker start` if systemd is off, and prints LAN-access steps. It needs `git-lfs` for the voice patch (it offers to install it). Keep the project on the WSL filesystem, not `/mnt/c`.
+On WSL2, `run.sh` also installs the NVIDIA Container Toolkit from NVIDIA's apt repo, starts Docker with `sudo service docker start` if systemd is off, and prints LAN-access steps. The voice patch is downloaded automatically on the first start. Keep the project on the WSL filesystem, not `/mnt/c`.
 
 Mac, or want to understand/customize what it's doing? Read on.
 

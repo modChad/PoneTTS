@@ -24,7 +24,7 @@ Self-hosted text-to-speech server for the **[MOSS-TTS-PNY](https://huggingface.c
 
 The GPU driver must work **outside** Docker first. Docker only passes the GPU through; it can't fix a broken host driver.
 
-**Git LFS:** the voice patch (`server/voice_patch/adapter_model.safetensors`) is stored with Git LFS. Without `git-lfs`, a clone leaves a tiny placeholder and the container fails with `SafetensorError: header too large`. `run.sh` detects this and offers to install `git-lfs` and run `git lfs pull`.
+**Voice patch:** the voice patch (`server/voice_patch/adapter_model.safetensors`, ~100 MB) isn't in the repo. It's downloaded automatically on the first start and checked against its SHA-256.
 
 ## Quick start
 
@@ -36,7 +36,7 @@ cd PoneTTS
 
 `run.sh`:
 
-0. Detects WSL (see below) and checks the voice patch isn't a Git LFS placeholder, offering to install `git-lfs` and fetch it.
+0. Detects WSL (see below).
 1. Checks for the Docker CLI, Engine, Compose and buildx, and offers to install anything missing (pacman, apt, dnf or zypper). It always asks before installing.
 2. Detects your GPU vendor and VRAM, and on NVIDIA checks for the NVIDIA Container Toolkit.
 3. Suggests a performance preset. You can accept it or pick your own.
@@ -162,6 +162,7 @@ Environment variables for the container:
 | `MOSS_AUTO_RESPELL` | `0` | Automatically respell rare words phonetically |
 | `MOSS_DECODER_RUNTIME` | from preset | Override the vocoder: `onnx_cuda`, `onnx_cpu` or `onnx_hybrid` |
 | `MOSS_HISTORY_MAX` | `500` | How many generated lines to keep in the history (oldest deleted first). `0` turns history off |
+| `MOSS_VOICE_PATCH_URL` / `MOSS_VOICE_PATCH_SHA256` | built-in link / checksum | Where the voice patch is downloaded from on first start. `MOSS_VOICE_PATCH_URL=0` turns the download off |
 | `HSA_OVERRIDE_GFX_VERSION` | `11.0.2` (AMD image) | AMD only: GPU architecture override. See [known issues](#known-issues) |
 | `HF_HUB_ENABLE_HF_TRANSFER` / `HF_HUB_DISABLE_XET` | `0` / `1` | The fast model downloaders are off by default; they got the container killed on test hardware |
 
@@ -291,7 +292,7 @@ Zecora = Zeh core ah
 - The file reloads automatically; no restart needed.
 - Check a respelling with `GET /normalize?text=I+beg+you`.
 
-**Voice patch (optional):** drop `adapter_model.safetensors` into `server/voice_patch/` and restart. It improves pronunciation for low-screen-time characters (Maud, Zecora, Cheerilee, Celestia, ...). Without it the server runs on the base model.
+**Voice patch:** `adapter_model.safetensors` is downloaded into `server/voice_patch/` on the first start (set `MOSS_VOICE_PATCH_URL=0` to skip it, or drop in your own copy). It improves pronunciation for low-screen-time characters (Maud, Zecora, Cheerilee, Celestia, ...). Without it the server runs on the base model.
 
 ## Project layout
 
@@ -326,7 +327,7 @@ Zecora = Zeh core ah
 | `fork/exec /usr/bin/docker-proxy: no such file or directory` | Reinstall Docker and restart the service, or set `{"userland-proxy": false}` in `/etc/docker/daemon.json` |
 | Container restarts during the model download | Usually memory. Check `docker compose logs`: the entrypoint prints the exit code and free disk space |
 | `torch.cuda.is_available() is False` | GPU not passed through: check the NVIDIA Container Toolkit (NVIDIA), or the `/dev/kfd` and `/dev/dri` devices (AMD) |
-| `SafetensorError: header too large` in the voice-patch step | The voice patch is a Git LFS placeholder. Run `./run.sh` (it offers the fix), or `sudo apt install git-lfs && git lfs install && git lfs pull` |
+| `[voice-patch] could not download the voice patch` | No network, or the download link is down. The server still runs on the base model. Put `adapter_model.safetensors` into `server/voice_patch/` and restart |
 | `$'\r': command not found` (WSL) | CRLF line endings. `sed -i 's/\r$//' run.sh server/*.sh`; the repo's `.gitattributes` forces LF on new clones |
 | `could not select device driver "nvidia"` (WSL) | NVIDIA Container Toolkit missing or Docker not restarted: re-run `./run.sh`, or `sudo nvidia-ctk runtime configure --runtime=docker && sudo service docker restart` |
 | Can't reach the server from the browser | Check `docker compose ps` and your port mapping. After a kernel update on Arch, reboot so Docker's networking modules load |

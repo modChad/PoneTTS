@@ -9,7 +9,7 @@ Voice identity and the emotion/energy controls are untouched.
 Applied automatically during setup by `apply_voice_patch.py` (merged into the
 downloaded checkpoint; the unpatched original is kept next to it).
 
-The adapter is stored with Git LFS. Clone with `git-lfs` installed (or run
-`git lfs install && git lfs pull`), otherwise the file is a ~130-byte
-placeholder and the voice-patch step fails with `header too large`.
-`./run.sh` detects this and offers to fix it.
+The adapter (`adapter_model.safetensors`, ~100 MB) isn't stored in the repo.
+`apply_voice_patch.py` downloads it here on the first start and checks its
+SHA-256. To use your own copy, drop it in this folder; set
+`MOSS_VOICE_PATCH_URL=0` to turn the download off.
