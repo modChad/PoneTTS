@@ -117,6 +117,13 @@ KNOWN ISSUES
 
 CHANGES IN THIS RELEASE
 -----------------------
+  - Whisper (the speech checks' model) is downloaded during setup into
+    release/whisper, so it survives container rebuilds, and loads during
+    warm-up when stuck-word or pronunciation checks are on. The first
+    request no longer waits for it (MOSS_WHISPER_MODEL)
+  - Web page: if the reply to a long request is lost on the way back, the
+    page waits for the line to appear in the history and plays it from
+    there instead of showing a NetworkError
   - NVIDIA only: removed AMD/ROCm support (the runtime-rocm Docker target,
     AMD detection in run.sh, the AMD compose example)
   - One data folder, server/data (MOSS_DATA_DIR; Docker: /app/data): settings,

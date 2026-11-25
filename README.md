@@ -154,6 +154,7 @@ Environment variables for the container:
 | `MOSS_COMMA_PAUSE_SEC` | `0.08` | Silence between pieces of a sentence split at commas |
 | `MOSS_STREAM_BUFFER_SEC` | `3` | Streaming only: seconds of audio generated before playback starts (`0` = off, large = wait for the whole line) |
 | `MOSS_PAUSE_SEC` | `0.35` | Silence at an em-dash or ellipsis (a deliberate pause) |
+| `MOSS_WHISPER_MODEL` | `small.en` | Whisper model the speech checks use. Downloaded during setup into the model volume, and loaded at start-up when `MOSS_FIX_STUCK_WORDS` or `MOSS_FIX_PRON` is on |
 | `MOSS_FIX_PRON` | `0` | Check rare words with Whisper and fix their pronunciation (slower) |
 | `MOSS_AUTO_RESPELL` | `0` | Automatically respell rare words phonetically |
 | `MOSS_DECODER_RUNTIME` | from preset | Override the vocoder: `onnx_cuda`, `onnx_cpu` or `onnx_hybrid` |

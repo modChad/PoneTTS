@@ -560,14 +560,30 @@ _whisper = None
 _whisper_lock = threading.Lock()
 
 
+# Whisper is stored next to the model (release/whisper) so a Docker volume keeps it;
+# prepare.py downloads it during setup.
+WHISPER_MODEL = os.environ.get("MOSS_WHISPER_MODEL", "small.en")
+WHISPER_DIR = RELEASE_DIR / "whisper"
+
+
 def _get_whisper():
     """faster-whisper on CPU int8 — verifies words without touching the GPU."""
     global _whisper
     with _whisper_lock:
         if _whisper is None:
             from faster_whisper import WhisperModel
-            _whisper = WhisperModel("small.en", device="cpu", compute_type="int8")
+            t0 = time.time()
+            _whisper = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8",
+                                    download_root=str(WHISPER_DIR))
+            print(f"[server] Whisper ({WHISPER_MODEL}) loaded in {time.time() - t0:.1f}s", flush=True)
     return _whisper
+
+
+def _preload_whisper() -> None:
+    try:
+        _get_whisper()
+    except Exception as exc:  # noqa: BLE001 - checks then fall back to loading on first use
+        print(f"[server] WARNING: could not load Whisper at start-up: {exc}", flush=True)
 
 
 def _transcribed_words(wav_bytes: bytes) -> list[str]:
@@ -2821,11 +2837,41 @@ async function poll(){{
  presetSel.disabled=false;speakBtn.disabled=false;
 }}
 let genCtl=null;
+async function newestMine(){{
+ const h=await (await fetch('/history?client=webui&limit=1')).json();
+ return {{enabled:h.enabled,item:(h.items||[])[0]||null}};
+}}
+// The reply to a long request can be lost on the way back (a proxy or the
+// network drops the connection) even though the server finishes and saves the
+// line. Wait for it to appear in the history and play it from there.
+async function recover(st,beforeId,text){{
+ st.textContent='connection dropped, waiting for the server to finish...';
+ let idle=0;const t0=Date.now();
+ while(Date.now()-t0<15*60*1000){{
+  await new Promise(r=>setTimeout(r,3000));
+  try{{
+   const n=await newestMine();
+   if(!n.enabled)break;
+   if(n.item&&n.item.id!==beforeId&&n.item.text===text){{
+    const a=document.getElementById('a');a.src=n.item.url;a.play();
+    st.textContent='ok ('+n.item.duration_sec+'s, fetched from history)';
+    loadHistory();return;
+   }}
+   const h=await (await fetch('/health')).json();
+   const busy=(h.activity||[]).some(x=>x.client==='webui');
+   idle=busy?0:idle+1;
+   if(idle>=3)break;
+  }}catch(e){{}}
+ }}
+ st.textContent='the reply was lost and the line is not in the history; try again';
+}}
 async function go(){{
  const st=document.getElementById('st');st.textContent='generating...';
  const body={{text:document.getElementById('t').value,
    speaker_id:+document.getElementById('s').value,
    audio_temperature:+document.getElementById('temp').value}};
+ let beforeId=null;
+ try{{beforeId=((await newestMine()).item||{{}}).id||null;}}catch(e){{}}
  genCtl=new AbortController();
  speakBtn.disabled=true;document.getElementById('stopmine').hidden=false;
  try{{
@@ -2837,7 +2883,10 @@ async function go(){{
   st.textContent='ok ('+(r.headers.get('X-Duration-Sec')||'?')+'s)';
   document.getElementById('a').play();
   loadHistory();
- }}catch(e){{st.textContent=(e.name==='AbortError')?'stopped':'error: '+e;}}
+ }}catch(e){{
+  if(e.name==='AbortError'){{st.textContent='stopped';}}
+  else{{document.getElementById('stopmine').hidden=false;await recover(st,beforeId,body.text);}}
+ }}
  finally{{genCtl=null;speakBtn.disabled=false;document.getElementById('stopmine').hidden=true;}}
 }}
 loadPresets();
@@ -3514,6 +3563,10 @@ def main() -> None:
 
     # build model BEFORE uvicorn binds the socket (the runtime may os.execv-restart
     # the process to set LD_LIBRARY_PATH; doing it first keeps that clean).
+    # Whisper (CPU) loads alongside the model when the default checks use it,
+    # so the first request doesn't pay for it.
+    if FIX_STUCK_WORDS_DEFAULT or FIX_PRON_DEFAULT:
+        threading.Thread(target=_preload_whisper, daemon=True).start()
     build_runner(args.preset, args.max_new_tokens)
     _blend_load_config()                 # per-speaker blends re-sync lazily per request
     _fx_load_config()                    # per-voice effects (voice_fx.json)
