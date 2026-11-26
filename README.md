@@ -320,7 +320,7 @@ Older versions kept these in `server/`, `server/state/`, `server/history/` and `
 
 ## Colab
 
-No NVIDIA GPU? `colab/pone_tts_colab.ipynb` runs the server on a free Google Colab GPU and gives you a public link for the game, SillyTavern or a browser. Click the **Open in Colab** badge at the top, then *Runtime → Run all*. The server settings from [Configuration](#configuration) (pauses, stream buffer, respelling, quality checks and so on) are a form in step 1. The link stops working when the Colab session ends.
+No NVIDIA GPU? `colab/pone_tts_colab.ipynb` runs the server on a free Google Colab GPU and gives you a public link for the game, SillyTavern or a browser. Click the **Open in Colab** badge at the top, then *Runtime → Run all*. The server settings from [Configuration](#configuration) (pauses, stream buffer, respelling, quality checks and so on) are a form in step 1. The public link comes from Cloudflare's free tunnel, or Gradio's (gradio.live) if Cloudflare is busy. It stops working when the Colab session ends.
 
 ## Project layout
 
